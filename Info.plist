@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>English</string>
+	<key>CFBundleExecutable</key>
+	<string>MtkWlan</string>
+	<key>CFBundleIdentifier</key>
+	<string>org.watchthelight.MtkWlan</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>MtkWlan</string>
+	<key>CFBundlePackageType</key>
+	<string>KEXT</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.5.0</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>CFBundleVersion</key>
+	<string>0.5.0</string>
+	<key>IOKitPersonalities</key>
+	<dict>
+		<key>MT7925 PCIe</key>
+		<dict>
+			<key>CFBundleIdentifier</key>
+			<string>org.watchthelight.MtkWlan</string>
+			<key>IOClass</key>
+			<string>MtkWlan</string>
+			<key>IOPCIPrimaryMatch</key>
+			<string>0x792514c3</string>
+			<key>IOProviderClass</key>
+			<string>IOPCIDevice</string>
+			<key>MtkDataRate</key>
+			<integer>22</integer>
+			<key>MtkSsid</key>
+			<string>Boingo 5GHz</string>
+		</dict>
+	</dict>
+	<key>OSBundleLibraries</key>
+	<dict>
+		<key>com.apple.iokit.IONetworkingFamily</key>
+		<string>1.0.0b1</string>
+		<key>com.apple.iokit.IOPCIFamily</key>
+		<string>2.9</string>
+		<key>com.apple.kpi.bsd</key>
+		<string>14.0</string>
+		<key>com.apple.kpi.iokit</key>
+		<string>14.0</string>
+		<key>com.apple.kpi.libkern</key>
+		<string>14.0</string>
+		<key>com.apple.kpi.mach</key>
+		<string>14.0</string>
+	</dict>
+	<key>OSBundleRequired</key>
+	<string>Network-Root</string>
+</dict>
+</plist>
