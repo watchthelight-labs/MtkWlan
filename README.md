@@ -76,13 +76,15 @@ kernel ignores `msgbuf=`, which is why these exist.
 
 ## Credits and licences
 
-- Linux **mt76** (MediaTek, ISC) for nearly everything about how the hardware works.
-- **itlmt7925** by thanhnndev and contributors (Clear BSD), used as a reference for the join
-  sequence and post-firmware setup.
-- acidanthera **MacKernelSDK**, tpoechtrager **cctools-port**, swiftlang **libdispatch** for the
-  toolchain.
-- MediaTek firmware from linux-firmware.
+- Linux **mt76** (MediaTek, ISC): nearly everything about how the hardware works.
+- **itlmt7925** by thanhnndev and contributors (Clear BSD): the join sequence and post-firmware
+  setup in `MtkJoin.cpp` and `MtkScan.cpp` follow it. Those parts keep its licence.
+- **itlwm** (OpenIntelWireless): the idea of a Wi-Fi kext that presents itself as Ethernet.
+- **RealtekRTL8111** (Mieze): the usual shape of an IOEthernetController kext.
+- MediaTek firmware from linux-firmware, unmodified.
+- Toolchain: acidanthera **MacKernelSDK**, tpoechtrager **cctools-port**, swiftlang **libdispatch**.
 
-See `LICENSE` and `NOTICE.md`. The boot-by-boot history (logs, register dumps, what broke and why)
-lives in [project-legion](https://github.com/watchthelight/project-legion), under
-`evidence/native/N-27` to `N-33`.
+`NOTICE.md` says which file comes from where, and lists the research behind it. `LICENSE`,
+`NOTICE.md` and `LICENSES/` must travel with any built copy of the kext. The boot-by-boot history
+(logs, register dumps, what broke and why) lives in
+[project-legion](https://github.com/watchthelight/project-legion), under `evidence/native/N-27` to `N-33`.
