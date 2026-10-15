@@ -4,6 +4,7 @@
 // W4: NIC capability (MAC), station interface, US channel domain, firmware scan.
 // W5: open-system auth + association to the target SSID (MtkSsid in Info.plist).
 // W6: Ethernet front-end (en1): 802.11 data TX/RX, TX-free tokens, keepalive, rejoin (MtkNet.cpp).
+// W8: HT/VHT association (WMM, HT/VHT caps, 20/40/80 MHz), firmware rate control, ADDBA declined.
 // Recovery keeps only 128 KB of kernel log, so every step publishes its result as a registry
 // property (Mtk*), which recon.sh / wifi.sh capture with ioreg.
 
@@ -121,12 +122,15 @@ private:
     void hwPrep();
     int joinStage();
     int authAssoc(bool first);
+    uint8_t *assocIes(uint8_t *p, bool ht);
 
     // MtkNet.cpp: W6
     bool txSlotReady(bool force);
     void txRelease(uint16_t slot);
     void txSweep();
-    void txQueue(uint32_t flen, uint8_t qIdx, uint8_t ftype, uint8_t stype, uint8_t rate, bool mcast, bool status);
+    void txQueue(uint32_t flen, uint8_t qIdx, uint8_t ftype, uint8_t stype, uint8_t rate, bool mcast, bool status,
+                 uint32_t hdrLen = 24);
+    void addbaDecline(const uint8_t *f, uint32_t flen);
     void txFree(const uint8_t *p, uint32_t len);
     void rxFrame(const uint8_t *p, uint32_t len);
     void deliver(const uint8_t *da, const uint8_t *sa, const uint8_t *typeAndPayload, uint32_t n);
@@ -187,7 +191,7 @@ private:
     IOEthernetInterface *netif = nullptr;
     IONetworkMedium *medium = nullptr;
     bool ifEnabled = false, linkReported = false, rxQueued = false, txStalled = false;
-    uint8_t dataRate = 22;                     // fixed-rate table index (22 = OFDM 24 Mb/s), MtkDataRate
+    uint8_t dataRate = 0;                      // MtkDataRate: 0 = firmware rate control (HT/VHT), 18-25 = fixed legacy rate
     uint32_t rxCtrl = 0;                       // DMA ctrl word of the last rxPoll
     uint32_t ticks = 0, lastTxTick = 0, rejoinAt = 0;
     bool txBusy[256] = {};
@@ -200,6 +204,17 @@ private:
     uint32_t rxTypes[32] = {};
     uint32_t txInFlight = 0, txInFlightPeak = 0, txCapped = 0;
     bool w6Pass = false;
+
+    // W8 HT/VHT: the AP's capabilities from its beacon, and what the association settled on
+    bool htOn = true;                          // MtkHt in Info.plist
+    uint8_t maxBw = 2;                         // MtkMaxBw: 0 = 20, 1 = 40, 2 = 80 MHz
+    bool apHt = false, apVht = false, htActive = false, vhtActive = false;
+    uint16_t apHtCap = 0;
+    uint8_t apAmpdu = 0, apRxMcs[10] = {}, apHtOp = 0;
+    uint32_t apVhtCap = 0;
+    uint16_t apVhtRx = 0xffff, apVhtTx = 0xffff;
+    uint8_t chBw = 0, chCenter = 0, apNss = 1;  // bw: 0 = 20, 1 = 40, 2 = 80 MHz (CMD_CBW_*)
+    uint32_t addbaDeclined = 0, rxAmsdu = 0;
 };
 
 #endif

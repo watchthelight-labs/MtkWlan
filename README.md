@@ -20,6 +20,7 @@ finished an Ookla speedtest over an open 5 GHz network.
 | W6 | Ethernet interface (`en1`), DHCP, ping, HTTP | pass |
 | W7 | Safari in Recovery, Ookla speedtest | pass: 19.42 Mb/s down, 9.57 Mb/s up |
 | 0.5.1 | latency under load | ping to 1.1.1.1: 15.8 ms idle, 32.9 ms while downloading, 68.7 ms while uploading (was 1.2 s) |
+| 0.6.0 | HT/VHT association | VHT, 80 MHz, 2 streams: 47.4 Mb/s down, 9.2 Mb/s up |
 
 On the same network the Windows driver does about 208/211 Mb/s with 23 ms of latency, so there is
 a long way to go.
@@ -29,8 +30,10 @@ a long way to go.
 - **Open networks only.** No WPA2/WPA3, so traffic is unencrypted. Use HTTPS.
 - **The network name is fixed in `Info.plist`** (`MtkSsid`). The driver scans once at boot and joins
   that SSID. There is no Wi-Fi menu: macOS sees an Ethernet card.
-- **Legacy 802.11a/g rates only** (no HT/VHT/HE, no aggregation), and TX uses a fixed rate
-  (`MtkDataRate`, default index 22 = 24 Mb/s). That's why it's slow.
+- **No aggregation yet.** The driver joins with HT/VHT (802.11n/ac, up to 80 MHz) and the firmware
+  picks the rate, but block-ack requests are declined until RX reordering exists, and upload is
+  still stuck near 9 Mb/s for a reason not found yet. No HE (802.11ax). `MtkHt` and `MtkMaxBw` in
+  `Info.plist` turn HT off or narrow the channel if a network misbehaves.
 - No Bluetooth (that's a separate USB device, `0489:E111`).
 - Tested on one laptop, in macOS 15.4.1 Recovery booted from USB with OpenCore. Never tested on
   an installed macOS, after sleep, or with the kext unloaded and reloaded.
@@ -49,8 +52,8 @@ The firmware in `firmware/` is checked against `firmware/SHA256SUMS` and embedde
 
 ## Use
 
-1. Set `MtkSsid` in `Info.plist` to an open network near you (and `MtkDataRate`, 18 to 25, if you
-   want a different fixed rate). Rebuild, or edit `out/MtkWlan.kext/Contents/Info.plist` directly.
+1. Set `MtkSsid` in `Info.plist` to an open network near you (`MtkDataRate` 18 to 25 forces a fixed
+   legacy rate; 0, the default, lets the firmware choose). Rebuild, or edit `out/MtkWlan.kext/Contents/Info.plist` directly.
 2. Add `MtkWlan.kext` to OpenCore `Kernel > Add` (`ExecutablePath` `Contents/MacOS/MtkWlan`).
    It only depends on Apple's own families.
 3. Boot. The driver joins during boot and attaches an Ethernet interface.

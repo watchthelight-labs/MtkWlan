@@ -7,6 +7,8 @@
 // BSD-3-Clause-Clear), its legacy 20 MHz path, adapted to an open network (capability without Privacy,
 // no RSN element, BSS security "open"). Tag values were checked against Linux mt76 v6.18
 // (mt76_connac_mcu.h: UNI_BSS_INFO_*, STA_REC_*, MCU_UNI_CMD_EDCA_UPDATE; Copyright (C) MediaTek Inc., ISC).
+// W8 (HT/VHT) follows Linux only: mt7925/mcu.c sta_ht_tlv, sta_vht_tlv, sta_phy_tlv, sta_state_v2_tlv,
+// sta_rate_ctrl_tlv, bss_rlm_tlv, and mt76_connac_get_phy_mode(_v2); the caps mirror mt7925/init.c.
 
 #include "MtkWlan.hpp"
 
@@ -101,6 +103,44 @@ void MtkWlan::parseAp() {
                     if (ie[2 + i] & 0x80) apBasic |= (uint8_t)(1u << k);
                 }
     }
+    apHt = apVht = false;
+    uint8_t vhtWidth = 0;
+    for (const uint8_t *ie = tgtIe, *end = tgtIe + tgtIeLen; ie + 2 <= end && ie + 2 + ie[1] <= end; ie += 2 + ie[1]) {
+        const uint8_t *b = ie + 2;
+        if (ie[0] == 45 && ie[1] >= 26) {               // HT Capabilities
+            apHt = true;
+            apHtCap = le16(b);
+            apAmpdu = b[2];
+            memcpy(apRxMcs, b + 3, 10);
+        } else if (ie[0] == 61 && ie[1] >= 2) {         // HT Operation
+            apHtOp = b[1];
+        } else if (ie[0] == 191 && ie[1] >= 12) {       // VHT Capabilities
+            apVht = true;
+            apVhtCap = (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24;
+            apVhtRx = le16(b + 4);
+            apVhtTx = le16(b + 8);
+        } else if (ie[0] == 192 && ie[1] >= 3) {        // VHT Operation
+            vhtWidth = b[0];
+        }
+    }
+    if (tgtCh <= 14) apVht = false;
+    apNss = (apRxMcs[1] || (apVht && ((apVhtRx >> 2) & 3) != 3)) ? 2 : 1;
+    chBw = 0;
+    chCenter = tgtCh;
+    if (apHt && (apHtOp & 4) && (apHtOp & 3)) {        // 40 MHz: secondary above (1) or below (3)
+        chBw = 1;
+        chCenter = (apHtOp & 3) == 1 ? tgtCh + 2 : tgtCh - 2;
+    }
+    if (apVht && vhtWidth >= 1 && tgtCh > 14) {         // 80 MHz (160 is used as 80)
+        chBw = 2;
+        chCenter = tgtCh >= 149 ? 155 : (uint8_t)(36 + ((tgtCh - 36) / 16) * 16 + 6);
+    }
+    if (chBw > maxBw) {
+        chBw = maxBw;
+        chCenter = tgtCh;
+        if (chBw == 1 && (apHtOp & 3)) chCenter = (apHtOp & 3) == 1 ? tgtCh + 2 : tgtCh - 2;
+        else chBw = 0;
+    }
 }
 
 int MtkWlan::bssInfo(bool enable) {
@@ -116,7 +156,8 @@ int MtkWlan::bssInfo(bool enable) {
     put16(b + 20, BMC_WCID);
     put16(b + 22, tgtBcnInt ? tgtBcnInt : 100);
     b[24] = 1;                                  // dtim_period
-    b[25] = tgtCh > 14 ? 0x01 : (0x02 | 0x04);  // phymode: A (5 GHz) / B|G
+    b[25] = tgtCh > 14 ? (uint8_t)(0x01 | (htActive ? 0x10 : 0) | (vhtActive ? 0x20 : 0))     // A | AN | AC
+                       : (uint8_t)(0x02 | 0x04 | (htActive ? 0x08 : 0));                      // B | G | GN
     put16(b + 26, AP_WCID);
     put16(b + 28, tgtCh > 14 ? 3 : 1);          // nonht_basic_phy: OFDM / ERP
     uint8_t *s = m.tlv(16, 8);                  // UNI_BSS_INFO_SEC: open
@@ -137,10 +178,14 @@ int MtkWlan::bssInfo(bool enable) {
     f[4] = 1;
     put16(f + 8, 9);
     if (enable) {
-        uint8_t *rl = m.tlv(2, 16);             // UNI_BSS_INFO_RLM: 20 MHz on the AP's channel
+        uint8_t *rl = m.tlv(2, 16);             // UNI_BSS_INFO_RLM (mt7925_mcu_bss_rlm_tlv)
+        uint8_t bw = htActive ? chBw : 0, center = bw ? chCenter : tgtCh;
         rl[4] = tgtCh;
-        rl[5] = tgtCh;
-        rl[8] = 1; rl[9] = 1;
+        rl[5] = center;
+        rl[7] = bw;
+        rl[8] = rl[9] = htActive ? 2 : 1;      // tx / rx streams (antenna mask 0x3)
+        rl[10] = bw ? 4 : 0;                    // ht_op_info: 40 MHz allowed
+        rl[11] = tgtCh < center ? 1 : tgtCh > center ? 3 : 0;   // sco: SCA / SCB
         rl[12] = tgtCh > 14 ? 2 : 1;
     }
     int rc = uniCmd(UNI_BSS_INFO_UPDATE, m.b, m.n, false, nullptr, 0, nullptr);
@@ -196,13 +241,33 @@ int MtkWlan::staRec(uint8_t state, bool newly, uint16_t aid) {
     put16(b + 10, aid);
     memcpy(b + 12, tgtBssid, 6);
     put16(b + 18, newly ? 3 : 1);               // EXTRA_INFO_VER | NEW
+    bool ht = state && htActive, vht = state && vhtActive;
     uint8_t *p = m.tlv(0x15, 12);               // STA_REC_PHY
     put16(p + 4, apBasic);
-    p[6] = 1u << 3;                             // PHY_TYPE_BIT_OFDM
+    p[6] = (uint8_t)((1u << 3) | (ht ? 1u << 4 : 0) | (vht ? 1u << 5 : 0));   // PHY_TYPE_BIT_OFDM | HT | VHT
+    if (ht) {
+        uint8_t af = apAmpdu & 3, mm = (apAmpdu >> 2) & 7;
+        if (vht && ((apVhtCap >> 23) & 7) > af) af = (apVhtCap >> 23) & 7;
+        p[7] = (uint8_t)(af | (mm << 2));       // ampdu: factor | density
+        p[10] = af;                             // max_ampdu_len
+    }
     uint8_t *ra = m.tlv(1, 16);                 // STA_REC_RA
     put16(ra + 4, (uint16_t)(apSupp << 6));     // RA_LEGACY_OFDM
-    uint8_t *st = m.tlv(7, 16);                 // STA_REC_STATE
+    if (ht) { ra[6] = apRxMcs[0]; ra[7] = apNss > 1 ? apRxMcs[1] : 0; }   // HT MCS the AP can receive
+    uint8_t *st = m.tlv(7, 16);                 // STA_REC_STATE (v2)
     st[4] = state;
+    if (vht) st[12] = (uint8_t)(chBw | (apNss << 4));                      // vht_opmode: bandwidth | rx_nss
+    if (ht) {
+        uint8_t *h = m.tlv(9, 8);               // STA_REC_HT: the AP's HT capability info, limited to ours
+        put16(h + 4, (uint16_t)(apHtCap & (0x0001 | (chBw ? 0x0002 : 0) | 0x000c | 0x0020 | (chBw ? 0x0040 : 0) |
+                                           0x0080 | 0x0300)));
+    }
+    if (vht) {
+        uint8_t *v = m.tlv(10, 16);             // STA_REC_VHT
+        put32(v + 4, apVhtCap & (0x3 | 0x10 | 0x20 | 0x80 | 0x700 | (7u << 23)));
+        put16(v + 8, (uint16_t)(apVhtRx | 0xfff0));       // streams 3-8 not supported
+        put16(v + 10, (uint16_t)(apVhtTx | 0xfff0));
+    }
     if (state) {
         uint8_t *ml = m.tlv(0x20, 28);          // STA_REC_MLD
         memcpy(ml + 4, tgtBssid, 6);
@@ -314,9 +379,50 @@ int MtkWlan::authAssoc(bool first) {
         return -4;
     }
 
-    // association request: ESS | short slot, listen interval 10, SSID, OFDM rates, no RSN (open)
-    hdr(0x00);
-    uint8_t *p = f + 24;
+    // association request: HT/VHT + WMM first when the AP offers HT, then legacy if that is refused
+    uint16_t st = 0xffff;
+    bool tryHt = htOn && apHt;
+    for (int pass = tryHt ? 0 : 1; pass < 2; pass++) {
+        bool withHt = pass == 0;
+        hdr(0x00);
+        uint8_t *p = assocIes(f + 24, withHt);
+        txOk = 0;
+        got = xchg(f, (uint32_t)(p - f), 0, 0x10, &txOk);
+        st = got ? le16(mgmt + 26) : 0xffff;
+        if (withHt) setNum(first ? "MtkW8AssocHtStatus" : "MtkW8RejoinHtStatus", st);
+        if (got && !st) {
+            aid = le16(mgmt + 28) & 0x3fff;
+            htActive = withHt;
+            vhtActive = withHt && apVht;
+            break;
+        }
+    }
+    setNum(first ? "MtkW5AssocTx" : "MtkW6RejoinAssocTx", txOk);
+    if (first) {
+        static const char *bwName[3] = {"20", "40", "80"};
+        char mode[64];
+        snprintf(mode, sizeof(mode), "%s, %u MHz, %u stream%s", vhtActive ? "VHT" : htActive ? "HT" : "legacy 11a/g",
+                 htActive ? (chBw == 2 ? 80 : chBw == 1 ? 40 : 20) : 20, htActive ? apNss : 1, htActive && apNss > 1 ? "s" : "");
+        setProperty("MtkW8Mode", mode);
+        char ap[96];
+        snprintf(ap, sizeof(ap), "ht %d cap %04x ampdu %02x mcs %02x%02x op %02x vht %d cap %08x rx %04x tx %04x bw %s ctr %u",
+                 apHt, apHtCap, apAmpdu, apRxMcs[0], apRxMcs[1], apHtOp, apVht, apVhtCap, apVhtRx, apVhtTx, bwName[chBw], chCenter);
+        setProperty("MtkW8Ap", ap);
+    }
+    setNum(first ? "MtkW5AssocStatus" : "MtkW6RejoinAssocStatus", st);
+    setNum(first ? "MtkW5Aid" : "MtkW6RejoinAid", aid);
+    if (!got || st) {
+        if (first) step(got ? "W5 fail: association rejected" : "W5 fail: no association response");
+        return -5;
+    }
+
+    return 0;
+}
+
+// Association request body: capability (ESS | short slot), listen interval 10, SSID, rates, and with ht
+// the HT and VHT capabilities of the MT7925 (mt7925/init.c, 2 streams, no beamforming, no A-MSDU above
+// 3839 bytes) plus the WMM information element. No RSN (open network).
+uint8_t *MtkWlan::assocIes(uint8_t *p, bool ht) {
     put16(p, tgtCh > 14 ? 0x0401 : 0x0421); p += 2;
     put16(p, 10); p += 2;
     uint8_t sl = (uint8_t)strlen(tgtSsid);
@@ -326,17 +432,25 @@ int MtkWlan::authAssoc(bool first) {
     static const uint8_t ext2[4] = {0x30, 0x48, 0x60, 0x6c};
     *p++ = 1; *p++ = 8; memcpy(p, tgtCh > 14 ? rates5 : rates2, 8); p += 8;
     if (tgtCh <= 14) { *p++ = 50; *p++ = 4; memcpy(p, ext2, 4); p += 4; }
-    txOk = 0;
-    got = xchg(f, (uint32_t)(p - f), 0, 0x10, &txOk);
-    setNum(first ? "MtkW5AssocTx" : "MtkW6RejoinAssocTx", txOk);
-    uint16_t st = got ? le16(mgmt + 26) : 0xffff;
-    if (got && !st) aid = le16(mgmt + 28) & 0x3fff;
-    setNum(first ? "MtkW5AssocStatus" : "MtkW6RejoinAssocStatus", st);
-    setNum(first ? "MtkW5Aid" : "MtkW6RejoinAid", aid);
-    if (!got || st) {
-        if (first) step(got ? "W5 fail: association rejected" : "W5 fail: no association response");
-        return -5;
+    if (!ht) return p;
+    *p++ = 45; *p++ = 26;                       // HT Capabilities
+    uint8_t *h = p;
+    bzero(h, 26);
+    put16(h, 0x0001 | 0x0002 | 0x000c | 0x0020 | 0x0040 | 0x0100);  // LDPC, 20/40, SM PS off, SGI20/40, RX STBC 1
+    h[2] = 0x03;                                // A-MPDU: 64 KB, no density restriction
+    h[3] = 0xff; h[4] = 0xff;                   // RX MCS 0-15
+    h[15] = 0x01;                               // TX MCS set defined
+    p += 26;
+    if (apVht) {
+        *p++ = 191; *p++ = 12;                  // VHT Capabilities
+        put32(p, 0x10 | 0x20 | 0x80 | 0x100 | (7u << 23));                // RXLDPC, SGI80, TX STBC, RX STBC 1, A-MPDU 1 MB
+        put16(p + 4, 0xfffa);                   // RX MCS 0-9, 2 streams
+        put16(p + 6, 0);
+        put16(p + 8, 0xfffa);                   // TX MCS 0-9, 2 streams
+        put16(p + 10, 0);
+        p += 12;
     }
-
-    return 0;
+    static const uint8_t wmm[9] = {0xdd, 0x07, 0x00, 0x50, 0xf2, 0x02, 0x00, 0x01, 0x00};   // WMM information
+    memcpy(p, wmm, 9);
+    return p + 9;
 }

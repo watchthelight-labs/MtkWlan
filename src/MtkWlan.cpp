@@ -83,6 +83,10 @@ bool MtkWlan::start(IOService *provider) {
     if (ssid) strlcpy(tgtSsid, ssid->getCStringNoCopy(), sizeof(tgtSsid));
     OSNumber *rate = OSDynamicCast(OSNumber, getProperty("MtkDataRate"));
     if (rate && rate->unsigned32BitValue() >= 18 && rate->unsigned32BitValue() <= 25) dataRate = (uint8_t)rate->unsigned8BitValue();
+    OSBoolean *ht = OSDynamicCast(OSBoolean, getProperty("MtkHt"));
+    if (ht) htOn = ht->isTrue();
+    OSNumber *mbw = OSDynamicCast(OSNumber, getProperty("MtkMaxBw"));
+    if (mbw && mbw->unsigned32BitValue() <= 2) maxBw = (uint8_t)mbw->unsigned32BitValue();
     setProperty("MtkMilestone", "W1");
 
     setNum("MtkPciCommandBefore", pci->configRead16(kIOPCIConfigCommand), 16);
