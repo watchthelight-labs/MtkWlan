@@ -2,9 +2,7 @@
 
 A macOS kext for the MediaTek MT7925 Wi-Fi card (PCI `14C3:7925`), written from scratch.
 
-> **This driver is vibe coded.** It was written by Claude (Anthropic's AI, in Claude Code) while I
-> booted test builds and reported what the screen said. I steered and tested; I did not hand-write
-> the code. Read it with that in mind, and don't run it on a machine you care about.
+> **This driver is vibe coded.** Read it with that in mind, and don't run it on a machine you care about.
 
 As far as I know there was no macOS driver for this card. On 2026-10-15 it got a Lenovo Legion 5
 15IAX10 from a working macOS Recovery environment onto the internet: Safari loaded apple.com and
