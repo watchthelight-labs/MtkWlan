@@ -124,6 +124,8 @@ private:
 
     // MtkNet.cpp: W6
     bool txSlotReady(bool force);
+    void txRelease(uint16_t slot);
+    void txSweep();
     void txQueue(uint32_t flen, uint8_t qIdx, uint8_t ftype, uint8_t stype, uint8_t rate, bool mcast, bool status);
     void txFree(const uint8_t *p, uint32_t len);
     void rxFrame(const uint8_t *p, uint32_t len);
@@ -196,6 +198,8 @@ private:
              rxOwn = 0, rxDropped = 0;
     uint32_t deauths = 0, lastDeauth = 0, rejoins = 0, keepalives = 0;
     uint32_t rxTypes[32] = {};
+    uint32_t txInFlight = 0, txInFlightPeak = 0, txCapped = 0;
+    bool w6Pass = false;
 };
 
 #endif

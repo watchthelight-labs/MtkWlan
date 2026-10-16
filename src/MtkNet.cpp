@@ -9,6 +9,8 @@
 // All of the above from Linux mt76 v6.18 (Copyright (C) 2023 MediaTek Inc., ISC).
 // A 1 ms work-loop timer polls both RX rings, sends a null-data keepalive when idle and re-joins
 // after a deauthentication. Counters are published as MtkW6* properties once a second.
+// 0.5.1: at most TX_INFLIGHT_MAX data frames wait in the firmware and the output queue holds 64, so
+// a full upload no longer builds a second of queue (N-33: 1215 ms loaded latency at 9.6 Mb/s).
 
 #include "MtkWlan.hpp"
 #include <IOKit/network/IOGatedOutputQueue.h>
@@ -19,6 +21,7 @@ constexpr uint8_t LMAC_AC_BE = 1, LMAC_ALTX0 = 0x10;
 constexpr uint8_t RATE_IDX_OFDM6 = 18, RATE_IDX_OFDM12 = 20;
 constexpr uint32_t DMA_CTL_LAST_SEC0 = 1u << 30;
 constexpr uint32_t TICK_US = 1000;
+constexpr uint32_t TX_INFLIGHT_MAX = 32, TXQ_CAPACITY = 64, TX_LOST_TICKS = 500;
 
 inline uint32_t le32(const uint8_t *p) { return (uint32_t)p[3] << 24 | (uint32_t)p[2] << 16 | (uint32_t)p[1] << 8 | p[0]; }
 inline uint16_t le16(const uint8_t *p) { return (uint16_t)(p[1] << 8 | p[0]); }
@@ -31,18 +34,35 @@ const uint8_t kBridgeTunnel[6] = {0xaa, 0xaa, 0x03, 0x00, 0x00, 0xf8};
 
 // ---------------------------------------------------------------- TX ring 0
 
-// The head slot can be filled when the device has fetched every descriptor but one, and the
-// firmware has released the slot's token (or 500 ticks passed without a release)
+// The head slot can be filled when the device has fetched every descriptor but one, fewer than
+// TX_INFLIGHT_MAX frames wait for a TX-free, and the firmware has released the slot's token
+// (or TX_LOST_TICKS passed without a release). force (management frames) skips the in-flight cap.
 bool MtkWlan::txSlotReady(bool force) {
     uint16_t next = (uint16_t)((txData.head + 1) % txData.n);
     if (next == (rawRead(txData.regs + 12) & 0xffff)) { txRingFull++; return false; }
+    if (!force && txInFlight >= TX_INFLIGHT_MAX) { txCapped++; return false; }
     uint16_t s = txData.head;
     if (txBusy[s]) {
-        if (!force && ticks - txBusyAt[s] < 500) return false;
-        txBusy[s] = false;
+        if (!force && ticks - txBusyAt[s] < TX_LOST_TICKS) return false;
+        txRelease(s);
         txLostFree++;
     }
     return true;
+}
+
+void MtkWlan::txRelease(uint16_t slot) {
+    if (!txBusy[slot]) return;
+    txBusy[slot] = false;
+    if (txInFlight) txInFlight--;
+}
+
+// Tokens the firmware never released (lost TX-free) stop counting as in flight
+void MtkWlan::txSweep() {
+    for (uint16_t i = 0; i < txData.n; i++)
+        if (txBusy[i] && ticks - txBusyAt[i] >= TX_LOST_TICKS) {
+            txRelease(i);
+            txLostFree++;
+        }
 }
 
 // TXD + hw txp for the frame already at slot + 128, then kick ring 0
@@ -68,6 +88,8 @@ void MtkWlan::txQueue(uint32_t flen, uint8_t qIdx, uint8_t ftype, uint8_t stype,
     d[1] = (64u << 16) | DMA_CTL_LAST_SEC0;                                       // SD_LEN0 = TXD + txp
     txBusy[slot] = true;
     txBusyAt[slot] = ticks;
+    txInFlight++;
+    if (txInFlight > txInFlightPeak) txInFlightPeak = txInFlight;
     txData.head = (uint16_t)((slot + 1) % txData.n);
     rawWrite(txData.regs + 8, txData.head);
     lastTxTick = ticks;
@@ -103,7 +125,7 @@ void MtkWlan::txFree(const uint8_t *p, uint32_t len) {
             if (id == 0x7fff) continue;
             count++;
             if (id < txData.n && txBusy[id]) {
-                txBusy[id] = false;
+                txRelease((uint16_t)id);
                 txFreed++;
             }
         }
@@ -252,6 +274,11 @@ void MtkWlan::tick() {
         }
         reportLink();
     }
+    if (ticks % 100 == 0) txSweep();
+    if (!w6Pass && ifEnabled && rxPackets && txPackets) {
+        w6Pass = true;
+        step("W6 pass: en1 passing traffic");
+    }
     if (ticks % 1000 == 0) publishW6();
     timer->setTimeoutUS(TICK_US);
 }
@@ -267,6 +294,8 @@ void MtkWlan::publishW6() {
     setNum("MtkW6TxFreeBadVer", txFreeBadVer);
     setNum("MtkW6TxLostFree", txLostFree);
     setNum("MtkW6TxFailed", txFailed);
+    setNum("MtkW6TxCapped", txCapped);
+    setNum("MtkW6TxInFlightPeak", txInFlightPeak);
     setNum("MtkW6RxPackets", rxPackets);
     setNum("MtkW6RxBad", rxBad);
     setNum("MtkW6RxPartial", rxPartial);
@@ -287,6 +316,11 @@ void MtkWlan::publishW6() {
     for (int t = 0; t < 32 && k + 12 < sizeof(s); t++)
         if (rxTypes[t]) k += snprintf(s + k, sizeof(s) - k, "%s%d:%u", k ? " " : "", t, rxTypes[t]);
     setProperty("MtkW6RxTypes", s[0] ? s : "none");
+    k = 0;
+    s[0] = 0;
+    for (int e = 0; e < 256 && k + 12 < sizeof(s); e++)
+        if (evCount[e]) k += snprintf(s + k, sizeof(s) - k, "%s%02x:%u", k ? " " : "", e, evCount[e]);
+    setProperty("MtkW6EventIds", s[0] ? s : "none");
 }
 
 // Called at the end of start() once W5 passed: timer, medium, network interface
@@ -324,7 +358,7 @@ IOWorkLoop *MtkWlan::getWorkLoop() const {
 }
 
 IOOutputQueue *MtkWlan::createOutputQueue() {
-    return IOGatedOutputQueue::withTarget(this, getWorkLoop(), 512);
+    return IOGatedOutputQueue::withTarget(this, getWorkLoop(), TXQ_CAPACITY);
 }
 
 IOReturn MtkWlan::getHardwareAddress(IOEthernetAddress *addr) {
@@ -335,7 +369,7 @@ IOReturn MtkWlan::getHardwareAddress(IOEthernetAddress *addr) {
 IOReturn MtkWlan::enable(IONetworkInterface *) {
     ifEnabled = true;
     if (IOOutputQueue *q = getOutputQueue()) {
-        q->setCapacity(512);
+        q->setCapacity(TXQ_CAPACITY);
         q->start();
     }
     reportLink();

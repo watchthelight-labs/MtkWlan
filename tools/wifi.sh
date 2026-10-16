@@ -42,6 +42,17 @@ if [ -n "$IF" ]; then
       http://captive.apple.com/hotspot-detect.html > captive.txt 2>&1
     curl -sS -m 30 -o /dev/null -w '%{http_code} %{size_download} %{speed_download}\n' -L \
       http://captive.apple.com/ > captive-follow.txt 2>&1
+    # perf: idle internet latency, then a download and an upload with a ping running alongside
+    echo "== perf (about 60 s)"
+    ping -c 10 -i 0.5 1.1.1.1 > ping-idle.txt 2>&1
+    ping -c 30 -i 0.5 1.1.1.1 > ping-down.txt 2>&1 &
+    curl -sS -m 40 -o /dev/null -w '%{http_code} %{size_download} %{speed_download}\n' \
+      'https://speed.cloudflare.com/__down?bytes=25000000' > down.txt 2>&1
+    wait
+    ping -c 30 -i 0.5 1.1.1.1 > ping-up.txt 2>&1 &
+    dd if=/dev/zero bs=1048576 count=10 2>/dev/null | curl -sS -m 40 -o /dev/null \
+      -w '%{http_code} %{size_upload} %{speed_upload}\n' --data-binary @- https://speed.cloudflare.com/__up > up.txt 2>&1
+    wait
   fi
   sleep 2
   ioreg -r -c MtkWlan -l -w0 > mtkwlan-after.txt 2>&1
@@ -50,6 +61,12 @@ if [ -n "$IF" ]; then
   [ -f ping.txt ] && echo "  ping: $(grep -E 'packets transmitted' ping.txt)"
   [ -f captive.txt ] && echo "  captive: $(head -c 160 captive.txt)"
   [ -f captive.html ] && echo "  page: $(head -c 120 captive.html | tr '\n' ' ')"
+  for f in down up; do
+    [ -f $f.txt ] && awk -v n=$f '{ printf "  %s: http %s, %.2f Mb/s\n", n, $1, $3 * 8 / 1000000 }' $f.txt
+  done
+  for f in ping-idle ping-down ping-up; do
+    [ -f $f.txt ] && echo "  $f: $(grep -E 'round-trip|packet loss' $f.txt | tr '\n' ' ')"
+  done
   echo "== MtkW6 counters"
   grep -E '"Mtk(W6[A-Za-z0-9]+|State)" =' mtkwlan-after.txt | sed 's/^[ |]*/  /'
 else
