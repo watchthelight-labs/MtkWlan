@@ -5,7 +5,7 @@
 #   make SDK=/path/to/MacKernelSDK
 NAME         := MtkWlan
 KEXT_ID      := org.watchthelight.MtkWlan
-KEXT_VERSION := 0.9.0
+KEXT_VERSION := 0.10.0
 
 SDK    ?= $(CURDIR)/MacKernelSDK
 LD     := LD_LIBRARY_PATH=/opt/dispatch/lib /opt/cctools/bin/x86_64-apple-darwin-ld

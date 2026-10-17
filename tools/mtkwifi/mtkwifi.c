@@ -165,8 +165,8 @@ static int cmd_status(io_connect_t c, int json) {
     if (get_status(c, &st)) return 1;
     if (json) {
         printf("{\"state\":\"%s\",\"link_up\":%u,\"port_open\":%u,\"security\":%u,\"scanning\":%u,\"auto_open\":%u,"
-               "\"want_active\":%u,\"channel\":%u,\"rssi\":%d,\"ssid\":", state_name(st.state), st.link_up, st.port_open,
-               st.security, st.scanning, st.auto_open, st.want_active, st.channel, st.rssi);
+               "\"want_active\":%u,\"front_end\":%u,\"channel\":%u,\"rssi\":%d,\"ssid\":", state_name(st.state), st.link_up,
+               st.port_open, st.security, st.scanning, st.auto_open, st.want_active, st.front_end, st.channel, st.rssi);
         json_str(st.ssid, st.ssid_len);
         printf(",\"last_result\":\"%s\",\"bss_count\":%u,\"scans\":%u,\"joins\":%u,\"join_failures\":%u,\"rejoins\":%u,"
                "\"eapol\":{\"m1\":%u,\"m2\":%u,\"m3\":%u,\"m4\":%u,\"g1\":%u,\"g2\":%u,\"bad_mic\":%u,\"replays\":%u},"
@@ -184,6 +184,7 @@ static int cmd_status(io_connect_t c, int json) {
     printf("link:       %s, port %s\n", st.link_up ? "associated" : "down", st.port_open ? "open" : "closed");
     printf("manager:    %s%s\n", st.want_active ? "network requested" : "no network requested",
            st.auto_open ? ", open-network fallback on" : "");
+    printf("front end:  %s\n", st.front_end == MTK_FE_NATIVE ? "native (macOS Wi-Fi manages the joins)" : "ethernet");
     printf("last join:  %s\n", result_name(st.last_result));
     printf("counters:   bss %u scans %u joins %u failures %u rejoins %u\n", st.bss_count, st.scans, st.joins, st.join_failures, st.rejoins);
     printf("handshake:  m1 %u m2 %u m3 %u m4 %u g1 %u g2 %u bad mic %u replays %u\n", st.m1, st.m2, st.m3, st.m4, st.g1, st.g2,
@@ -468,6 +469,7 @@ static int cmd_autojoin(io_connect_t c) {
     if (!g_nnets) { puts("autojoin: no saved networks"); return 0; }
     struct mtk_status st;
     if (get_status(c, &st)) return 1;
+    if (st.front_end == MTK_FE_NATIVE && !st.auto_open) { puts("autojoin: native front end active, macOS manages the joins"); return 0; }
     for (int i = 0; i < g_nnets; i++)
         if (st.state == MTK_ST_CONNECTED && st.port_open && st.want_active && st.ssid_len == strlen(g_nets[i].ssid) &&
             !memcmp(st.ssid, g_nets[i].ssid, st.ssid_len)) {

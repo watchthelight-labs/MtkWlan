@@ -257,6 +257,17 @@ void MtkWlan::bssNoteFrame(const uint8_t *f, uint32_t flen, int8_t rssi) {
     }
     rxBeacons++;
     bssNote(f, flen, ssid, ssidLen, ch, rssi);
+    for (int i = 0; i < nBss; i++)
+        if (!memcmp(bss[i].bssid, f + 16, 6)) { bss[i].probe = (f[0] & 0xf0) == 0x50; break; }
+}
+
+// The primary 20 MHz channels of the domain the firmware scans (kCh2 + kCh5): what the native front end reports as
+// supported channels. Any thread: the arrays are constants.
+uint32_t MtkWlan::coreChannels(uint8_t *list, uint32_t max) {
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < sizeof(kCh2) && n < max; i++) list[n++] = kCh2[i];
+    for (uint32_t i = 0; i < sizeof(kCh5) && n < max; i++) list[n++] = kCh5[i];
+    return n;
 }
 
 // Upsert one BSS by BSSID: the newest beacon's fixed fields and elements, its security, when it was last seen.

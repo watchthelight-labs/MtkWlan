@@ -814,7 +814,8 @@ int MtkWlan::coreJoin(const mtk_join_params *p) {
                 !memcmp(tgtSsid, p->ssid, p->ssid_len) && wantHasPmk == hasPmk &&
                 (!hasPmk || mtk_ct_equal(wantPmk, p->pmk, 32)) && (!bssidGiven || !memcmp(tgtBssid, p->bssid, 6));
     if (same) return 0;
-    autoOpen = nAutoOpenSsids > 0;              // a join turns the open fallback back on after a disconnect
+    // a join turns the open fallback back on after a disconnect, unless the native front end owns the joins
+    autoOpen = nAutoOpenSsids > 0 && !(feMode == MTK_FE_NATIVE && !(feModeFlags & MTK_FE_KEEP_AUTOOPEN));
     wantActive = true;
     wantHasPmk = hasPmk;
     wantSsidLen = p->ssid_len;
@@ -858,6 +859,7 @@ void MtkWlan::coreStatus(mtk_status *out) {
     out->scanning = scanRunning;
     out->auto_open = autoOpen;
     out->want_active = wantActive;
+    out->front_end = (uint8_t)feMode;
     if (joinState || joinedOnce) {
         out->channel = tgtCh;
         memcpy(out->bssid, tgtBssid, 6);
@@ -914,6 +916,44 @@ uint32_t MtkWlan::coreResults(mtk_scan_result *out, uint32_t max) {
     return n;
 }
 
+// The cached BSS at index in best-first order (as coreResults), with its elements
+int MtkWlan::coreGetBss(uint32_t index, mtk_bss_info *out) {
+    if (!out || (int)index >= nBss) return -1;
+    bool used[MTK_SCAN_MAX] = {};
+    int best = -1;
+    for (uint32_t n = 0; n <= index; n++) {
+        best = -1;
+        int bestScore = 0;
+        for (int i = 0; i < nBss; i++) {
+            if (used[i]) continue;
+            int s = bssScore(bss[i]);
+            if (best < 0 || s > bestScore) { best = i; bestScore = s; }
+        }
+        if (best < 0) return -1;
+        used[best] = true;
+    }
+    const MtkBss &b = bss[best];
+    bzero(out, sizeof(*out));
+    memcpy(out->bssid, b.bssid, 6);
+    out->channel = b.ch;
+    out->rssi = b.rssi;
+    out->ssid_len = b.ssidLen;
+    memcpy(out->ssid, b.ssid, 32);
+    out->security = b.sec;
+    out->akm = b.akm;
+    out->pairwise = b.pairwise;
+    out->group = b.group;
+    out->flags = b.flags;
+    if (joinState && !memcmp(b.bssid, tgtBssid, 6)) out->flags |= MTK_BSS_CURRENT;
+    out->probe_resp = b.probe;
+    out->capability = b.cap;
+    out->beacon_interval = b.bcnInt;
+    out->ie_len = b.ieLen > MTK_BSS_IE_MAX ? MTK_BSS_IE_MAX : b.ieLen;
+    memcpy(out->ie, b.ie, out->ie_len);
+    out->age_ms = ticks - b.lastSeen;
+    return 0;
+}
+
 // The user client's calls land here through workLoop->runAction (MtkUserClient.cpp)
 IOReturn MtkWlan::gatedUserCall(OSObject *owner, void *sel, void *in, void *out, void *outSize) {
     MtkWlan *self = OSDynamicCast(MtkWlan, owner);
@@ -931,10 +971,13 @@ IOReturn MtkWlan::gatedUserCall(OSObject *owner, void *sel, void *in, void *out,
         return kIOReturnSuccess;
     }
     case kMtkUcJoin: {
+        // the native front end owns the joins (macOS manages networks): the tool only reports
+        if (self->feMode == MTK_FE_NATIVE && !(self->feModeFlags & MTK_FE_KEEP_AUTOOPEN)) return kIOReturnBusy;
         int r = self->coreJoin(static_cast<const mtk_join_params *>(in));
         return r == 0 ? kIOReturnSuccess : r == -1 ? kIOReturnBadArgument : kIOReturnNotReady;
     }
     case kMtkUcDisconnect:
+        if (self->feMode == MTK_FE_NATIVE && !(self->feModeFlags & MTK_FE_KEEP_AUTOOPEN)) return kIOReturnBusy;
         return self->coreDisconnect() == 0 ? kIOReturnSuccess : kIOReturnNotReady;
     case kMtkUcStatus:
         if (!out || !osz || *osz < sizeof(mtk_status)) return kIOReturnBadArgument;

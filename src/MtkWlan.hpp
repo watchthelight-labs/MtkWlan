@@ -21,6 +21,7 @@
 #include <IOKit/IOService.h>
 #include <IOKit/IOWorkLoop.h>
 #include <IOKit/IOTimerEventSource.h>
+#include <kern/thread_call.h>
 #include <sys/kpi_mbuf.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/pci/IOPCIDevice.h>
@@ -57,6 +58,7 @@ struct MtkBss {
     uint8_t ssidLen, ch;
     int8_t rssi;                               // dBm from the P-RXV RCPI, -127 unknown
     uint8_t sec, akm, pairwise, group, flags;  // MtkUserApi.h MTK_SEC_* / MTK_AKM_* / MTK_CIPHER_* / MTK_BSS_*
+    uint8_t probe;                             // the last frame heard was a probe response (else a beacon)
     uint16_t cap, bcnInt, rsnCaps;
     uint32_t lastSeen;                         // ticks
     uint16_t seen, ieLen;
@@ -194,6 +196,17 @@ private:
     // MtkNet.cpp: W6 data path and the front-end side of the ops table
     static const mtk_core_ops kOps;
     static const mtk_core_ops_v2 kOpsV2;
+    static const mtk_core_ops_v3 kOpsV3;
+    static int opSetMode(void *core, uint32_t mode, uint32_t flags);
+    static int opGetBss(void *core, uint32_t index, mtk_bss_info *out);
+    static int opGetChannels(void *core, uint8_t *list, uint32_t max, uint32_t *count);
+    static int opTxBytes(void *core, const uint8_t *frame, uint32_t len);
+    int coreGetBss(uint32_t index, mtk_bss_info *out);
+    uint32_t coreChannels(uint8_t *list, uint32_t max);
+    int txFrame(const uint8_t *eh, uint32_t len, mbuf_t m, const uint8_t *bytes);
+    int txEthernetBytes(const uint8_t *frame, uint32_t len);
+    void frontEndService();
+    static void feFallbackThread(void *owner, void *);
     static int opScan(void *core);
     static int opResults(void *core, mtk_scan_result *out, uint32_t max, uint32_t *count);
     static int opJoin(void *core, const mtk_join_params *p);
@@ -348,6 +361,11 @@ private:
     IOTimerEventSource *timer = nullptr;
     IOService *frontEnd = nullptr;             // MtkWlanEth child, created by startFrontEnd()
     mtk_fe_callbacks fe = {};                  // all null while no front end is registered
+    // 0.10.0: front-end selection (MtkFrontEnd / boot-arg mtkfe). With "native" the core publishes itself and waits for
+    // MtkWlanNative to register; if it declines or stays away, the Ethernet front end starts (frontEndService)
+    bool feNativeWanted = false, feDeclined = false, feFallbackDone = false;
+    uint32_t feWantedAt = 0, feMode = MTK_FE_ETHERNET, feModeFlags = 0;
+    thread_call_t feFallbackCall = nullptr;
     bool ifEnabled = false, linkReported = false, rxQueued = false, txStalled = false;
     uint8_t dataRate = 0;                      // MtkDataRate: 0 = firmware rate control (HT/VHT), 18-25 = fixed legacy rate
     uint32_t rxCtrl = 0;                       // DMA ctrl word of the last rxPoll

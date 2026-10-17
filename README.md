@@ -12,6 +12,7 @@ Everything below was measured on one laptop (Legion 5 15IAX10, OpenCore 1.0.8) o
 
 | Version | What it adds | Tested on | Result |
 |---|---|---|---|
+| 0.10.0 | core ops v3 (`set_mode`, `get_bss`, `get_channels`, `tx_bytes`), front-end selection (`MtkFrontEnd`: Ethernet, native front end optional) with Ethernet fallback, `mtkwifi` shows the front end | macOS 26.7.1 (25G241) | 192.7 Mb/s down, 134.6 Mb/s up, 16 ms idle ping, 0 % loss; same auto join at boot |
 | 0.9.0 | scan and join machines, `mtkwifi` tool, saved networks, auto join at boot, WPA2-PSK code | macOS 26.7.1 (25G241) | 190.8 Mb/s down, 174.8 Mb/s up, 16 ms idle ping, 0 % loss; joins the network by itself at boot |
 | 0.8.0 | core / front end split, native macOS build | macOS 26.7.1 | 195 / 97 Mb/s |
 | 0.7.0 | block ack both ways, TX power tables | macOS 15.8.1 (24H32) | 193 / 146 Mb/s |
@@ -100,7 +101,7 @@ sudo bash tools/build-toolchain.sh   # clang, Apple ld64 (cctools-port), libdisp
 make                                 # out/MtkWlan.kext
 ```
 
-The firmware in `firmware/` is checked against `firmware/SHA256SUMS` and embedded in the binary. The macOS build is reproducible: the 0.9.0 release binary (sha256 `d52449f9b8ee16e1e1c32a0362fb6d8f4dc1758fb2c4cdc2054de82ea03f89b0`) is what a clean build of this tree gives with Apple clang 17.0.0 (clang-1700.0.13.5), and it is the file that produced the numbers above.
+The firmware in `firmware/` is checked against `firmware/SHA256SUMS` and embedded in the binary. The macOS build is reproducible (the same sources with the same Apple clang 17.0.0, clang-1700.0.13.5, give the same binary). The 0.10.0 release zip holds the binary from the tested boot (sha256 `00f68f99d8e6ab2ea4cc3ba36f7b44a7d7bcd9fc32440ecc80674a0b62de3394`). It was built a few minutes before the last 0.10.0 edit (`MtkNet.cpp` publishing the `MtkFrontEndActive` registry property), so a clean build of this tag gives `a1645f7e39749d13c13adb302518cf0e63bbc29e7fe60dc198c08e587689bb90` instead; the string tables differ only by that property name. The next boot uses the clean build.
 
 ## How it works
 

@@ -422,6 +422,7 @@ void MtkWlan::tick() {
     joinService();
     scanService();
     cmService();
+    frontEndService();
     if (linkUp && portOpen && ticks - lastTxTick > 10000) keepalive();
     if (ticks % 100 == 0) txSweep();
     baService();
@@ -526,12 +527,44 @@ int MtkWlan::netStage() {
     timer = IOTimerEventSource::timerEventSource(this, &MtkWlan::timerFired);
     if (!timer || wl->addEventSource(timer) != kIOReturnSuccess) { step("W6 fail: timer"); return -2; }
 
+    if (feNativeWanted) {
+        // 0.10.0: MtkWlanNative matches us (registerService ran in start) and registers through the ops table; the Ethernet
+        // front end only starts if it declines (MTK_CORE_FE_DECLINED) or has not registered within the fallback time
+        feWantedAt = ticks;
+        feFallbackCall = thread_call_allocate(&MtkWlan::feFallbackThread, this);
+        setProperty("MtkFrontEndWanted", "native");
+        timer->setTimeoutUS(TICK_US);
+        step("W6 waiting for the native front end (MtkWlanNative)");
+        return 0;
+    }
     int fr = startFrontEnd();
     setNum("MtkW0FrontEnd", (uint32_t)fr);
     timer->setTimeoutUS(TICK_US);
     if (fr) { step("W6 fail: Ethernet front end (MtkWlanEth) did not start; machines running without it"); return -4; }
     step("W6 interface attached (link down until a network is joined)");
     return 0;
+}
+
+constexpr uint32_t FE_FALLBACK_TICKS = 15000;   // 15 s at the 1 ms tick
+
+// Tick: while the native front end is wanted and nothing has registered, start the Ethernet one after a decline or
+// FE_FALLBACK_TICKS. The start itself runs on its own thread (IONetworkController::start and the interface attach belong
+// off the gate, as in the normal path), never from the tick.
+void MtkWlan::frontEndService() {
+    if (!feNativeWanted || feFallbackDone || fe.rx || !feFallbackCall) return;
+    if (!feDeclined && ticks - feWantedAt < FE_FALLBACK_TICKS) return;
+    feFallbackDone = true;
+    setProperty("MtkFrontEndFallback", feDeclined ? "native front end declined, Ethernet front end started"
+                                                  : "native front end did not register in time, Ethernet front end started");
+    thread_call_enter(feFallbackCall);
+}
+
+void MtkWlan::feFallbackThread(void *owner, void *) {
+    MtkWlan *self = static_cast<MtkWlan *>(owner);
+    int fr = self->startFrontEnd();
+    self->setNum("MtkW0FrontEnd", (uint32_t)fr);
+    self->step(fr ? "W6 fail: Ethernet front end (MtkWlanEth) did not start after the native fallback"
+                  : "W6 interface attached by the fallback (link down until a network is joined)");
 }
 
 // The front end is a child in the service plane, found by class name so the core needs no MtkWlanEth header.
@@ -563,6 +596,13 @@ const mtk_core_ops_v2 MtkWlan::kOpsV2 = {
     &MtkWlan::opScan, &MtkWlan::opResults, &MtkWlan::opJoin, &MtkWlan::opDisconnect, &MtkWlan::opStatus,
 };
 
+const mtk_core_ops_v3 MtkWlan::kOpsV3 = {
+    {{MTK_CORE_API_V3, sizeof(mtk_core_ops_v3), &MtkWlan::opSetCallbacks, &MtkWlan::opTx, &MtkWlan::opSetEnabled,
+      &MtkWlan::opGetMac, &MtkWlan::opGetLinkInfo},
+     &MtkWlan::opScan, &MtkWlan::opResults, &MtkWlan::opJoin, &MtkWlan::opDisconnect, &MtkWlan::opStatus},
+    &MtkWlan::opSetMode, &MtkWlan::opGetBss, &MtkWlan::opGetChannels, &MtkWlan::opTxBytes,
+};
+
 IOReturn MtkWlan::callPlatformFunction(const OSSymbol *functionName, bool waitForFunction, void *param1, void *param2,
                                        void *param3, void *param4) {
     if (functionName && functionName->isEqualTo(MTK_CORE_OPS_V1)) {
@@ -577,6 +617,16 @@ IOReturn MtkWlan::callPlatformFunction(const OSSymbol *functionName, bool waitFo
         *(void **)param2 = this;
         return kIOReturnSuccess;
     }
+    if (functionName && functionName->isEqualTo(MTK_CORE_OPS_V3)) {
+        if (!param1 || !param2) return kIOReturnBadArgument;
+        *(const mtk_core_ops_v3 **)param1 = &kOpsV3;
+        *(void **)param2 = this;
+        return kIOReturnSuccess;
+    }
+    if (functionName && functionName->isEqualTo(MTK_CORE_FE_DECLINED)) {
+        feDeclined = true;                      // the tick's frontEndService starts the Ethernet front end
+        return kIOReturnSuccess;
+    }
     return IOService::callPlatformFunction(functionName, waitForFunction, param1, param2, param3, param4);
 }
 
@@ -586,7 +636,7 @@ int MtkWlan::opSetCallbacks(void *core, const mtk_fe_callbacks *cb) {
     MtkWlan *self = static_cast<MtkWlan *>(core);
     if (cb) {
         bool v1 = cb->version == MTK_CORE_API_V1 && cb->size >= sizeof(mtk_fe_callbacks);
-        bool v2 = cb->version == MTK_CORE_API_V2 && cb->size >= sizeof(mtk_fe_callbacks_v2);
+        bool v2 = (cb->version == MTK_CORE_API_V2 || cb->version == MTK_CORE_API_V3) && cb->size >= sizeof(mtk_fe_callbacks_v2);
         if ((!v1 && !v2) || !cb->rx_alloc || !cb->rx || !cb->rx_flush || !cb->link || !cb->tx_space) return -1;
     }
     if (!self->workLoop) return -1;
@@ -599,7 +649,7 @@ IOReturn MtkWlan::gatedSetCallbacks(OSObject *owner, void *arg, void *, void *, 
     if (cb) {
         if (self->fe.rx) return kIOReturnBusy;  // one front end at a time
         memcpy(&self->fe, cb, sizeof(self->fe));
-        if (cb->version == MTK_CORE_API_V2) {
+        if (cb->version >= MTK_CORE_API_V2) {
             const mtk_fe_callbacks_v2 *v2 = reinterpret_cast<const mtk_fe_callbacks_v2 *>(cb);
             self->feScanDone = v2->scan_done;
             self->feJoinResult = v2->join_result;
@@ -612,6 +662,8 @@ IOReturn MtkWlan::gatedSetCallbacks(OSObject *owner, void *arg, void *, void *, 
     bzero(&self->fe, sizeof(self->fe));
     self->feScanDone = nullptr;
     self->feJoinResult = nullptr;
+    self->feMode = MTK_FE_ETHERNET;             // a front end that leaves hands the joins back to the manager
+    self->feModeFlags = 0;
     self->ifEnabled = false;
     self->linkReported = false;
     self->rxQueued = false;
@@ -620,6 +672,28 @@ IOReturn MtkWlan::gatedSetCallbacks(OSObject *owner, void *arg, void *, void *, 
 
 int MtkWlan::opTx(void *core, mbuf_t m) {
     return static_cast<MtkWlan *>(core)->txEthernet(m);
+}
+
+// v3 (gate held by the caller)
+int MtkWlan::opSetMode(void *core, uint32_t mode, uint32_t flags) {
+    MtkWlan *self = static_cast<MtkWlan *>(core);
+    if (mode != MTK_FE_ETHERNET && mode != MTK_FE_NATIVE) return -1;
+    self->feMode = mode;
+    self->feModeFlags = flags;
+    if (mode == MTK_FE_NATIVE && !(flags & MTK_FE_KEEP_AUTOOPEN)) self->autoOpen = false;   // macOS drives the joins
+    else if (!self->wantActive) self->autoOpen = self->nAutoOpenSsids > 0;
+    self->setProperty("MtkFrontEndActive", mode == MTK_FE_NATIVE ? (flags & MTK_FE_KEEP_AUTOOPEN ? "native (auto-open kept)" : "native")
+                                                            : "ethernet");
+    return 0;
+}
+int MtkWlan::opGetBss(void *core, uint32_t index, mtk_bss_info *out) { return static_cast<MtkWlan *>(core)->coreGetBss(index, out); }
+int MtkWlan::opGetChannels(void *core, uint8_t *list, uint32_t max, uint32_t *count) {
+    if (!list || !count) return -1;
+    *count = static_cast<MtkWlan *>(core)->coreChannels(list, max);
+    return 0;
+}
+int MtkWlan::opTxBytes(void *core, const uint8_t *frame, uint32_t len) {
+    return static_cast<MtkWlan *>(core)->txEthernetBytes(frame, len);
 }
 
 void MtkWlan::opSetEnabled(void *core, int enabled) {
@@ -671,7 +745,21 @@ int MtkWlan::opStatus(void *core, mtk_status *out) {
 // port is open; once the PTK is installed every frame goes out protected (hardware CCMP).
 int MtkWlan::txEthernet(mbuf_t m) {
     uint32_t len = (uint32_t)mbuf_pkthdr_len(m);
-    if (!linkUp || !portOpen || len < 14 || len > 1514) {
+    if (len < 14 || len > 1514) { txDrop++; return MTK_TX_DROPPED; }
+    uint8_t eh[14];
+    mbuf_copydata(m, 0, 14, eh);
+    return txFrame(eh, len, m, nullptr);
+}
+
+// 0.10.0: the same frame as bytes (the native front end hands the Skywalk packet's buffer straight in)
+int MtkWlan::txEthernetBytes(const uint8_t *frame, uint32_t len) {
+    if (!frame || len < 14 || len > 1514) { txDrop++; return MTK_TX_DROPPED; }
+    return txFrame(frame, len, nullptr, frame);
+}
+
+// eh = the 14-byte Ethernet header; the payload comes from the mbuf (m) or follows the header in bytes
+int MtkWlan::txFrame(const uint8_t *eh, uint32_t len, mbuf_t m, const uint8_t *bytes) {
+    if (!linkUp || !portOpen) {
         if (linkUp && !portOpen) txPortDrop++;
         txDrop++;
         return MTK_TX_DROPPED;
@@ -681,8 +769,6 @@ int MtkWlan::txEthernet(mbuf_t m) {
         txStalled = true;
         return MTK_TX_STALL;
     }
-    uint8_t eh[14];
-    mbuf_copydata(m, 0, 14, eh);
     uint8_t *f = txData.bufs.va + txData.head * txData.bufSize + 128;
     bool qos = htActive;                        // WMM was negotiated with the HT association
     bool protect = ptkInstalled;
@@ -698,7 +784,8 @@ int MtkWlan::txEthernet(mbuf_t m) {
     memcpy(f + h, kSnap, 6);
     f[h + 6] = eh[12];
     f[h + 7] = eh[13];
-    mbuf_copydata(m, 14, len - 14, f + h + 8);
+    if (m) mbuf_copydata(m, 14, len - 14, f + h + 8);
+    else memcpy(f + h + 8, bytes + 14, len - 14);
     bool mc = eh[0] & 1;
     uint8_t rate = mc ? RATE_IDX_OFDM12 : (dataRate ? dataRate : htActive ? 0 : RATE_IDX_OFDM24);
     bool sample = !mc && (++txsSampleSeq & 63) == 0;

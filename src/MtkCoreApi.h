@@ -107,6 +107,51 @@ struct mtk_core_ops_v2 {
     int (*get_status)(void *core, struct mtk_status *out);
 };
 
+// ---- version 3 (0.10.0): what the native IO80211 front end (MtkWlanNative.kext) needs beyond v2 ----------------------
+// MTK_CORE_OPS_V3 returns a struct mtk_core_ops_v3 whose first member is the v2 table (version 3 in it) and accepts
+// struct mtk_fe_callbacks_v2 with version MTK_CORE_API_V3 (same callbacks: RX stays mbuf based because the block-ack
+// reorder buffer holds mbufs). v1 and v2 front ends are unaffected.
+#define MTK_CORE_OPS_V3      "mtk-core-ops-v3"
+#define MTK_CORE_API_V3      3
+// A front end that could not start (the native kext declined its probe) tells the core so the Ethernet front end starts
+// at once instead of after the fallback timer: callPlatformFunction(MTK_CORE_FE_DECLINED, false, (void *)reason, ...).
+#define MTK_CORE_FE_DECLINED "mtk-core-fe-declined"
+
+// MTK_FE_ETHERNET / MTK_FE_NATIVE are in MtkUserApi.h (mtk_status.front_end reports the same value).
+// set_mode flags: MTK_FE_KEEP_AUTOOPEN keeps the allow-listed open-network fallback while the native front end has no
+// join path of its own (stage B/C boots); without it the native front end drives every join and the user client's join /
+// disconnect answer busy.
+enum { MTK_FE_KEEP_AUTOOPEN = 1 };
+#define MTK_BSS_IE_MAX 512
+
+// One cached BSS with everything the native scan-result event needs (fixed-size, copied out under the gate)
+struct mtk_bss_info {
+    uint8_t bssid[6];
+    uint8_t channel;
+    int8_t rssi;              // dBm, -127 unknown
+    uint8_t ssid_len;
+    uint8_t ssid[32];
+    uint8_t security, akm, pairwise, group, flags;   // as mtk_scan_result
+    uint8_t probe_resp;       // 1 = the last frame heard was a probe response, 0 = a beacon
+    uint16_t capability;      // capability information field
+    uint16_t beacon_interval; // TUs
+    uint16_t ie_len;
+    uint32_t age_ms;
+    uint8_t ie[MTK_BSS_IE_MAX];
+};
+
+struct mtk_core_ops_v3 {
+    struct mtk_core_ops_v2 v2;
+    // which front end owns the data path and the joins; MTK_FE_* and MTK_FE_KEEP_AUTOOPEN. Gate held. 0 on success.
+    int (*set_mode)(void *core, uint32_t mode, uint32_t flags);
+    // the cached BSS at index (0 = best), with its IEs; -1 past the end. Gate held.
+    int (*get_bss)(void *core, uint32_t index, struct mtk_bss_info *out);
+    // the primary 20 MHz channels of the regulatory domain the core scans and joins. Any thread. *count written.
+    int (*get_channels)(void *core, uint8_t *list, uint32_t max, uint32_t *count);
+    // one Ethernet frame as bytes (14-byte header + payload, 60..1514); same results as tx. Gate held.
+    int (*tx_bytes)(void *core, const uint8_t *frame, uint32_t len);
+};
+
 #ifdef __cplusplus
 }
 #endif

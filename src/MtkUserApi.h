@@ -75,6 +75,9 @@ enum {
     MTK_JOIN_RSN_MISMATCH = 14,
 };
 
+// which front end owns the data path (mtk_status.front_end, mtk_core_ops_v3 set_mode)
+enum { MTK_FE_ETHERNET = 0, MTK_FE_NATIVE = 1 };
+
 // connection manager states (mtk_status.state)
 enum { MTK_ST_IDLE = 0, MTK_ST_SCANNING = 1, MTK_ST_JOINING = 2, MTK_ST_HANDSHAKE = 3, MTK_ST_CONNECTED = 4,
        MTK_ST_WAITING = 5 };
@@ -93,7 +96,8 @@ struct mtk_status {
     int8_t rssi;
     uint8_t ssid_len;
     char ssid[33];
-    uint8_t _pad[3];
+    uint8_t front_end;        // MTK_FE_* (0.10.0; was padding)
+    uint8_t _pad[2];
     uint32_t last_result;     // MTK_JOIN_*
     uint32_t bss_count;
     uint32_t scans, joins, join_failures, rejoins;

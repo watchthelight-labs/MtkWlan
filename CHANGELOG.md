@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.0 (2026-10-17)
+
+- Core ops table v3 (`MtkCoreApi.h`): `set_mode`, `get_bss`, `get_channels` and `tx_bytes`, so a native Wi-Fi front end can drive the core without a C++ link.
+- Front-end selection: `MtkFrontEnd` in `Info.plist` picks the Ethernet front end (default) or a native front end built against the same ops table; if the chosen front end does not come up the core falls back to Ethernet (`MtkFrontEndFallback`). `OSBundleCompatibleVersion` is set so a separate front-end kext can link against the core.
+- `mtkwifi status` reports the active front end and stands down (no join management) when the native front end owns the interface.
+- Same behaviour as 0.9.0 on the Ethernet front end. Measured on the same open 5 GHz network: 192.7 Mb/s down, 134.6 Mb/s up (20 MB POST), 16 ms idle ping, 0 % loss, 15 dropped RX frames in the first minutes (0 in the 0.9.0 run; being watched).
+- The release binary predates the last source edit of this version (`MtkNet.cpp`, `MtkFrontEndActive` property); see the README for both hashes.
+
 ## 0.9.0 (2026-10-17)
 
 - The network name is no longer fixed in `Info.plist`. The driver scans from its 1 ms tick, keeps a cache of the networks it hears (with each one's security), and joins what it is asked to join.

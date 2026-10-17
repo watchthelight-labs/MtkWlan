@@ -12,6 +12,7 @@
 
 #include "MtkWlan.hpp"
 #include "MtkCrypto.h"
+#include <pexpert/pexpert.h>
 
 OSDefineMetaClassAndStructors(MtkWlan, IOService)
 
@@ -103,6 +104,11 @@ bool MtkWlan::start(IOService *provider) {
         }
     }
     autoOpen = nAutoOpenSsids > 0;
+    // 0.10.0: which front end owns the data path. MtkFrontEnd "native" waits for MtkWlanNative.kext (falls back to the
+    // Ethernet front end if it declines or stays away); boot-arg mtkfe=native|ethernet overrides the plist
+    if (OSString *feStr = OSDynamicCast(OSString, getProperty("MtkFrontEnd"))) feNativeWanted = feStr->isEqualTo("native");
+    char feArg[16] = {};
+    if (PE_parse_boot_arg_str("mtkfe", feArg, sizeof(feArg))) feNativeWanted = !strcmp(feArg, "native");
     OSNumber *rate = OSDynamicCast(OSNumber, getProperty("MtkDataRate"));
     if (rate && rate->unsigned32BitValue() >= 18 && rate->unsigned32BitValue() <= 25) dataRate = (uint8_t)rate->unsigned8BitValue();
     OSBoolean *pwr = OSDynamicCast(OSBoolean, getProperty("MtkPower"));
@@ -196,6 +202,11 @@ void MtkWlan::stop(IOService *provider) {
 }
 
 void MtkWlan::free() {
+    if (feFallbackCall) {
+        thread_call_cancel(feFallbackCall);
+        thread_call_free(feFallbackCall);
+        feFallbackCall = nullptr;
+    }
     OSSafeReleaseNULL(frontEnd);
     OSSafeReleaseNULL(workLoop);
     IOService::free();
