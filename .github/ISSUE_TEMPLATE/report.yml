@@ -1,0 +1,42 @@
+name: Report
+description: A bug, or a report from another machine
+body:
+  - type: input
+    id: machine
+    attributes:
+      label: Laptop model
+      placeholder: Legion 5 15IAX10 (83F0)
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: macOS build, OpenCore version, MtkWlan version
+      placeholder: 26.7.1 (25G241), OpenCore 1.0.8, MtkWlan 0.9.0
+    validations:
+      required: true
+  - type: input
+    id: network
+    attributes:
+      label: Network type
+      placeholder: open 5 GHz / WPA2-PSK 2.4 GHz / WPA3 ...
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of mtkwifi status --json
+      render: json
+  - type: textarea
+    id: ioreg
+    attributes:
+      label: Output of ioreg -r -c MtkWlan -l -w0
+      description: Counters and state only; the driver never publishes keys.
+      render: text
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Paste the panic line if there was one.
+    validations:
+      required: true
