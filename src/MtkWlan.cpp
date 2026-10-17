@@ -4,10 +4,16 @@
 // ownership handshakes in mt792x_core.c (Copyright (C) 2023 MediaTek Inc., ISC):
 //   memory + bus master on, BAR0 mapped, fw_own then drv_own, read chip ID and revision.
 // Then W2/W3 (MtkFw.cpp): WFSYS reset, WFDMA rings, MSI, patch + RAM firmware download.
+// 0.8.0 (W0): the core is a plain IOService with its own work loop; the Ethernet front end (MtkWlanEth)
+// is created as a child in netStage() and shares that work loop.
+// 0.9.0 (W1): no hard-coded SSID. After the firmware runs, hwInit() readies the station and netStage() starts
+// the front end (link down) and the tick; the connection manager scans and joins from there. MtkAutoOpenSsids
+// (Info.plist) lists the open networks it may join on its own; everything else comes through the user client.
 
 #include "MtkWlan.hpp"
+#include "MtkCrypto.h"
 
-OSDefineMetaClassAndStructors(MtkWlan, IOEthernetController)
+OSDefineMetaClassAndStructors(MtkWlan, IOService)
 
 namespace {
 // mt792x_regs.h / mt7925/regs.h
@@ -70,8 +76,14 @@ void MtkWlan::listInterrupts() {
 }
 
 bool MtkWlan::start(IOService *provider) {
-    if (!IOEthernetController::start(provider))
+    if (!IOService::start(provider))
         return false;
+    // 0.7.0 got its work loop from IONetworkController::start (createWorkLoop); the core makes its own
+    workLoop = IOWorkLoop::workLoop();
+    if (!workLoop) {
+        IOService::stop(provider);
+        return false;
+    }
 
     pci = OSDynamicCast(IOPCIDevice, provider);
     if (!pci) {
@@ -79,10 +91,26 @@ bool MtkWlan::start(IOService *provider) {
         return true; // stay attached so the state is visible
     }
     pci->retain();
-    OSString *ssid = OSDynamicCast(OSString, getProperty("MtkSsid"));
-    if (ssid) strlcpy(tgtSsid, ssid->getCStringNoCopy(), sizeof(tgtSsid));
+    // IONetworkingFamily takes the interface's IOBuiltin from the controller's provider, which is now this
+    // core and no longer the PCI device: carry the device's "built-in" over so en1 stays built-in
+    if (OSObject *builtin = pci->getProperty("built-in")) setProperty("built-in", builtin);
+    // open networks the connection manager may join by itself (SSID prefixes); none = never
+    if (OSArray *list = OSDynamicCast(OSArray, getProperty("MtkAutoOpenSsids"))) {
+        for (unsigned i = 0; i < list->getCount() && nAutoOpenSsids < 4; i++) {
+            OSString *s = OSDynamicCast(OSString, list->getObject(i));
+            if (!s || !s->getLength() || s->getLength() > 32) continue;
+            strlcpy(autoOpenSsids[nAutoOpenSsids++], s->getCStringNoCopy(), 33);
+        }
+    }
+    autoOpen = nAutoOpenSsids > 0;
     OSNumber *rate = OSDynamicCast(OSNumber, getProperty("MtkDataRate"));
     if (rate && rate->unsigned32BitValue() >= 18 && rate->unsigned32BitValue() <= 25) dataRate = (uint8_t)rate->unsigned8BitValue();
+    OSBoolean *pwr = OSDynamicCast(OSBoolean, getProperty("MtkPower"));
+    if (pwr) powerOn = pwr->isTrue();
+    OSBoolean *rxba = OSDynamicCast(OSBoolean, getProperty("MtkRxBa"));
+    if (rxba) rxBaOn = rxba->isTrue();
+    OSBoolean *txba = OSDynamicCast(OSBoolean, getProperty("MtkTxBa"));
+    if (txba) txBaOn = txba->isTrue();
     OSBoolean *ht = OSDynamicCast(OSBoolean, getProperty("MtkHt"));
     if (ht) htOn = ht->isTrue();
     OSNumber *mbw = OSDynamicCast(OSNumber, getProperty("MtkMaxBw"));
@@ -148,10 +176,9 @@ void MtkWlan::stop(IOService *provider) {
         if (workLoop) workLoop->removeEventSource(timer);
         OSSafeReleaseNULL(timer);
     }
-    if (netif) {
-        detachInterface(netif);
-        OSSafeReleaseNULL(netif);
-    }
+    secReset();
+    mtk_zero(wantPmk, sizeof(wantPmk));
+    // the front end (child) is stopped before its provider; its stop already removed the callbacks
     if (irqIndex >= 0) {
         pci->disableInterrupt(irqIndex);
         pci->unregisterInterrupt(irqIndex);
@@ -159,16 +186,17 @@ void MtkWlan::stop(IOService *provider) {
     }
     if (mmio)
         rawWrite(0xd4208, rawRead(0xd4208) & ~0x5u); // WFDMA0 GLO_CFG: stop TX/RX DMA before freeing rings
+    for (uint8_t t = 0; t < 8; t++) rxBaStop(t);
     ringFree(txData); ringFree(txMcu); ringFree(txFwdl); ringFree(rxMcu); ringFree(rxData);
     OSSafeReleaseNULL(mapper);
     OSSafeReleaseNULL(map);
     mmio = nullptr;
     OSSafeReleaseNULL(pci);
-    IOEthernetController::stop(provider);
+    IOService::stop(provider);
 }
 
 void MtkWlan::free() {
-    OSSafeReleaseNULL(medium);
+    OSSafeReleaseNULL(frontEnd);
     OSSafeReleaseNULL(workLoop);
-    IOEthernetController::free();
+    IOService::free();
 }

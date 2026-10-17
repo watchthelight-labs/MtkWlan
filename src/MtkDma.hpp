@@ -15,6 +15,7 @@ struct MtkDmaMem {
     IODMACommand *cmd = nullptr;
     uint8_t *va = nullptr;
     uint32_t iova = 0;   // device-visible address
+    uint64_t phys = 0;   // CPU physical address, to compare with iova
     uint32_t len = 0;
 
     // Returns 0 on success, or a step number (1..5) that failed, for logging

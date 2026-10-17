@@ -35,6 +35,7 @@ int MtkDmaMem::alloc(uint32_t size, IOMapper *mapper, uint32_t align) {
     }
     va = (uint8_t *)bmd->getBytesNoCopy();
     iova = (uint32_t)seg.fIOVMAddr;
+    phys = bmd->getPhysicalSegment(0, nullptr, kIOMemoryMapperNone);
     len = size;
     bzero(va, size);
     return 0;

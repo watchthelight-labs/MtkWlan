@@ -381,8 +381,9 @@ int MtkWlan::bringUp() {
     if ((e = ringAlloc(txMcu, false, TXQ_MCU_WM, 32, 2048)))  { setNum("MtkW2RingFail", 200 + e); step("W2 fail: ring alloc"); return -3; }
     if ((e = ringAlloc(txFwdl, false, TXQ_FWDL, 32, 4096)))   { setNum("MtkW2RingFail", 300 + e); step("W2 fail: ring alloc"); return -3; }
     if ((e = ringAlloc(rxMcu, true, RXQ_MCU_WM, 128, 2048)))   { setNum("MtkW2RingFail", 400 + e); step("W2 fail: ring alloc"); return -3; }
-    if ((e = ringAlloc(rxData, true, RXQ_BAND0, 256, 2048)))   { setNum("MtkW2RingFail", 500 + e); step("W2 fail: ring alloc"); return -3; }
+    if ((e = ringAlloc(rxData, true, RXQ_BAND0, 512, 2048)))   { setNum("MtkW2RingFail", 500 + e); step("W2 fail: ring alloc"); return -3; }
     setNum("MtkW2RxMcuIova", rxMcu.desc.iova);
+    setNum("MtkW2RxMcuPhys", rxMcu.desc.phys, 64);   // equal to the iova: no VT-d translation
 
     // mt792x_dma_enable (mt7925 branch of mt792x_dma_prefetch)
     auto pf = [](uint32_t base, uint32_t depth) { return (base << 16) | depth; };
@@ -439,8 +440,11 @@ int MtkWlan::bringUp() {
     if (!ready) { step("W3 fail: N9 not ready after FW_START"); return -7; }
     step("W3 pass: firmware running (N9 ready)");
     setProperty("MtkMilestone", "W6");
-    if (scanStage() == 0 && joinStage() == 0)
+    // 0.9.0: station ready, then the front end (link down) and the tick; the connection manager scans and joins
+    if (hwInit() == 0) {
+        scanWanted = true;
         netStage();
+    }
     setNum("MtkIrqCount", irqCount);
     setNum("MtkRxEvents", rxEvents);
     setNum("MtkRxUnmatched", rxUnmatched);

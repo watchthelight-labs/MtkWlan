@@ -1,10 +1,11 @@
 # <wtl> project: mtkwlan | file: Makefile | author: watchthelight </wtl>
 # Cross-builds MtkWlan.kext on Linux (or WSL). Toolchain: tools/build-toolchain.sh.
+# On macOS use tools/build-mac.sh instead (Command Line Tools, no SDK clone).
 #   make            -> out/MtkWlan.kext
 #   make SDK=/path/to/MacKernelSDK
 NAME         := MtkWlan
 KEXT_ID      := org.watchthelight.MtkWlan
-KEXT_VERSION := 0.6.0
+KEXT_VERSION := 0.9.0
 
 SDK    ?= $(CURDIR)/MacKernelSDK
 LD     := LD_LIBRARY_PATH=/opt/dispatch/lib /opt/cctools/bin/x86_64-apple-darwin-ld
@@ -13,8 +14,9 @@ CXX    := clang++
 TARGET := -target x86_64-apple-macos10.15
 RES    := $(shell clang -print-resource-dir)/include
 
-SRCS := src/MtkWlan.cpp src/MtkRegs.cpp src/MtkDma.cpp src/MtkFw.cpp src/MtkScan.cpp src/MtkJoin.cpp src/MtkNet.cpp \
-        out/gen/MtkFirmware.c
+SRCS := src/MtkWlan.cpp src/MtkRegs.cpp src/MtkDma.cpp src/MtkFw.cpp src/MtkScan.cpp src/MtkJoin.cpp src/MtkSec.cpp \
+        src/MtkNet.cpp src/MtkBa.cpp src/MtkPower.cpp src/MtkWlanEth.cpp src/MtkUserClient.cpp \
+        src/MtkCrypto.c src/MtkSupp.c out/gen/MtkFirmware.c
 
 KFLAGS := $(TARGET) -mkernel -fapple-kext -nostdinc -fno-builtin -fno-common -fno-stack-protector \
           -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT \
@@ -30,9 +32,13 @@ BIN  := out/$(NAME).kext/Contents/MacOS/$(NAME)
 
 all: $(BIN) out/$(NAME).kext/Contents/Info.plist check
 
-out/obj/%.cpp.o: src/%.cpp src/*.hpp
+out/obj/%.cpp.o: src/%.cpp src/*.hpp src/*.h
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+out/obj/%.c.o: src/%.c src/*.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
 
 out/obj/MtkFirmware.c.o: out/gen/MtkFirmware.c
 	@mkdir -p $(dir $@)
@@ -62,7 +68,11 @@ check: $(BIN)
 	@echo "undefined symbols: $$(llvm-nm -u $(BIN) | wc -l)"
 	@! llvm-nm -u $(BIN) | grep -E '^_{2,3}(cxa_|Unwind|gxx_)' || (echo "FAIL: C++ runtime symbols the kernel does not export"; false)
 
+# host tests for the WPA2 code (clang, UBSan, Python oracle); writes only to out/tests/
+test:
+	bash tests/run.sh
+
 clean:
 	rm -rf out
 
-.PHONY: all check clean
+.PHONY: all check test clean

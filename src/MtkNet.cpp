@@ -1,29 +1,43 @@
 // <wtl> project: mtkwlan | file: src/MtkNet.cpp | author: watchthelight </wtl>
 // SPDX-License-Identifier: ISC
-// W6: Ethernet front-end (IOEthernetController, en1) over the BSS joined in W5.
+// W6: data path over the BSS joined in W5 (the Ethernet front end itself is MtkWlanEth.cpp from 0.8.0).
 // TX: Ethernet -> 802.11 data (ToDS, non-QoS, LLC/SNAP) on TX ring 0 in CT mode; TXD per
 //   mt7925_mac_write_txwi / _80211 and hw txp per mt76_connac_write_hw_txp. The token is the slot
 //   index, released by the firmware's TXRX_NOTIFY (mt7925_mac_tx_free).
 // RX: RXD groups and header pad per mt7925_mac_fill_rx, then 802.11 (FromDS) -> Ethernet. RX header
 //   translation stays off (STA_REC_HDR_TRANS dis_rx_hdr_tran), but a translated frame is accepted too.
 // All of the above from Linux mt76 v6.18 (Copyright (C) 2023 MediaTek Inc., ISC).
-// A 1 ms work-loop timer polls both RX rings, sends a null-data keepalive when idle and re-joins
-// after a deauthentication. Counters are published as MtkW6* properties once a second.
+// A 1 ms work-loop timer polls both RX rings, runs the scan / join / security machines, sends a null-data
+// keepalive when idle. Counters are published as MtkW6* properties once a second.
 // 0.5.1: at most TX_INFLIGHT_MAX data frames wait in the firmware and the output queue holds 64, so
-// a full upload no longer builds a second of queue (N-33: 1215 ms loaded latency at 9.6 Mb/s).
+// a full upload no longer builds a second of queue (measured: 1215 ms loaded latency at 9.6 Mb/s).
 // 0.6.0 (W8): QoS data and firmware rate control after an HT/VHT association; ADDBA requests are declined
 // (status 37), so there is no aggregation yet and no RX reordering is needed.
+// 0.6.1: every 64th unicast data frame asks for a TX status record (rate, power, tries, ACK errors);
+// TX-free headers add attempt counts. Published as MtkW9* to find why upload stays near 9 Mb/s.
+// 0.8.0 (W0): the IONetworkController half moved to MtkWlanEth. This file keeps the 802.11 side and serves
+// the ops table (MtkCoreApi.h): txEthernet is the old outputPacket body, received frames go to the
+// front end's rx / rx_flush, link changes to its link callback, a cleared TX stall to tx_space. All of
+// them run on the core work loop gate (tick, or the front end's gated output queue / command gate).
+// 0.9.0 (W1/W2): the RX path only classifies, queues and delivers (a deauth sets deauthPending, EAPOL goes to
+// the supplicant queue, block-ack actions to baQueue); it never issues a firmware command. Data is gated by the
+// port: nothing but EAPOL passes before the keys are installed on a WPA2 network. Protected frames must have been
+// decrypted by the hardware with the expected cipher (RXD2 SEC_MODE), plaintext data on a WPA2 association is
+// dropped. TX sets FC Protected and TXD3 PROTECT_FRAME once the PTK is installed; the firmware adds the CCMP
+// header and PN. The ops table v2 adds scan / results / join / disconnect / status for a native front end.
 
 #include "MtkWlan.hpp"
-#include <IOKit/network/IOGatedOutputQueue.h>
+#include "MtkCrypto.h"
 
 namespace {
 constexpr uint16_t AP_WCID = 1;                  // same as MtkJoin.cpp
-constexpr uint8_t LMAC_AC_BE = 1, LMAC_ALTX0 = 0x10;
+constexpr uint8_t LMAC_AC_BE = 1;
 constexpr uint8_t RATE_IDX_OFDM6 = 18, RATE_IDX_OFDM12 = 20, RATE_IDX_OFDM24 = 22;
 constexpr uint32_t DMA_CTL_LAST_SEC0 = 1u << 30;
 constexpr uint32_t TICK_US = 1000;
-constexpr uint32_t TX_INFLIGHT_MAX = 32, TXQ_CAPACITY = 64, TX_LOST_TICKS = 500;
+constexpr uint32_t TX_LOST_TICKS = 500;
+constexpr uint64_t LINK_SPEED = 54000000ULL;    // what en1 reports while associated (0.5.0 on)
+constexpr uint32_t REJOIN_DELAY_TICKS = 500;
 
 inline uint32_t le32(const uint8_t *p) { return (uint32_t)p[3] << 24 | (uint32_t)p[2] << 16 | (uint32_t)p[1] << 8 | p[0]; }
 inline uint16_t le16(const uint8_t *p) { return (uint16_t)(p[1] << 8 | p[0]); }
@@ -42,7 +56,7 @@ const uint8_t kBridgeTunnel[6] = {0xaa, 0xaa, 0x03, 0x00, 0x00, 0xf8};
 bool MtkWlan::txSlotReady(bool force) {
     uint16_t next = (uint16_t)((txData.head + 1) % txData.n);
     if (next == (rawRead(txData.regs + 12) & 0xffff)) { txRingFull++; return false; }
-    if (!force && txInFlight >= TX_INFLIGHT_MAX) { txCapped++; return false; }
+    if (!force && txInFlight >= txInflightMax) { txCapped++; return false; }
     uint16_t s = txData.head;
     if (txBusy[s]) {
         if (!force && ticks - txBusyAt[s] < TX_LOST_TICKS) return false;
@@ -68,17 +82,20 @@ void MtkWlan::txSweep() {
 }
 
 // TXD + hw txp for the frame already at slot + 128, then kick ring 0
-// rate 0 = no FIXED_RATE (firmware rate control from STA_REC_RA)
+// rate 0 = no FIXED_RATE (firmware rate control from STA_REC_RA); protect = TXD3 PROTECT_FRAME (hardware CCMP
+// with the installed key, the frame carries FC Protected)
 void MtkWlan::txQueue(uint32_t flen, uint8_t qIdx, uint8_t ftype, uint8_t stype, uint8_t rate, bool mcast, bool status,
-                      uint32_t hdrLen) {
+                      uint32_t hdrLen, uint8_t tid, bool protect) {
     uint16_t slot = txData.head;
     uint8_t *w = txData.bufs.va + slot * txData.bufSize;
     uint32_t pa = txData.bufs.iova + slot * txData.bufSize;
     bzero(w, 128);
     put32(w + 0, (flen + 32) | (0u << 23) | ((uint32_t)qIdx << 25));            // TX_BYTES, PKT_FMT CT, Q_IDX
-    put32(w + 4, AP_WCID | (2u << 14) | ((hdrLen / 2) << 16) | (rate ? 1u << 31 : 0));   // WLAN_IDX, HDR 802.11, HDR_INFO, FIXED_RATE
+    put32(w + 4, AP_WCID | (2u << 14) | ((hdrLen / 2) << 16) | ((uint32_t)(tid & 0xf) << 21) |
+                 (rate ? 1u << 31 : 0));                                       // WLAN_IDX, HDR 802.11, HDR_INFO, TID, FIXED_RATE
     put32(w + 8, ((uint32_t)ftype << 4) | stype);                                 // FRAME_TYPE, SUB_TYPE
-    put32(w + 12, (15u << 11) | (mcast ? 1u << 4 : 0) | (status ? 1u << 28 : 0)); // REM_TX_COUNT, BCM, BA_DISABLE
+    // BA_DISABLE with TX status or a fixed rate, as at the end of mt7925_mac_write_txwi; PROTECT_FRAME with a key
+    put32(w + 12, (15u << 11) | (mcast ? 1u << 4 : 0) | ((status || rate) ? 1u << 28 : 0) | (protect ? 1u << 1 : 0));
     put32(w + 20, status ? (3 | (1u << 10)) : 0);                                 // PID, TX_STATUS_HOST
     put32(w + 24, (1u << 2) | (1u << 4) | (1u << 3) | ((uint32_t)rate << 16));    // DAS, MSDU_CNT 1, DIS_MAT, TX_RATE
     put16(w + 32, (uint16_t)(slot | 0x8000));                                     // txp.msdu_id[0] = token | VALID
@@ -99,12 +116,12 @@ void MtkWlan::txQueue(uint32_t flen, uint8_t qIdx, uint8_t ftype, uint8_t stype,
     lastTxTick = ticks;
 }
 
-// Management frame (auth / assoc) at 6 Mb/s with TX status, waits until the device fetched it
-bool MtkWlan::txMgmt(const uint8_t *frame, uint32_t len, uint8_t subtype) {
+// Management frame (auth / assoc / deauth / block ack) at 6 Mb/s with TX status, waits until the device fetched it
+bool MtkWlan::txMgmt(const uint8_t *frame, uint32_t len, uint8_t subtype, uint8_t qIdx, uint8_t tid) {
     if (len > 1900 || len < 24) return false;
-    txSlotReady(true);
+    if (!txSlotReady(true)) return false;                              // ring full: do not overwrite the head slot
     memcpy(txData.bufs.va + txData.head * txData.bufSize + 128, frame, len);
-    txQueue(len, LMAC_ALTX0, 0, subtype, RATE_IDX_OFDM6, false, true);
+    txQueue(len, qIdx, 0, subtype, RATE_IDX_OFDM6, false, true, 24, tid);
     for (int t = 0; t < 2000; t++) {
         if ((rawRead(txData.regs + 12) & 0xffff) == txData.head) return true;
         IODelay(100);
@@ -121,7 +138,9 @@ void MtkWlan::txFree(const uint8_t *p, uint32_t len) {
         uint32_t info = le32(p + o);
         if (info & (1u << 31)) continue;                          // new WLAN_ID pair
         if (info & (1u << 30)) {                                  // header: tx count / status
-            if ((info >> 28) & 3) txFailed++;
+            if ((info >> 28) & 3) { txFailed++; tfStatErr++; }
+            tfHeaders++;
+            tfAttempts += (info >> 24) & 0xf;
             continue;
         }
         for (int i = 0; i < 2; i++) {
@@ -138,7 +157,9 @@ void MtkWlan::txFree(const uint8_t *p, uint32_t len) {
 
 // ---------------------------------------------------------------- RX
 
-// A received frame while joined: data to the stack, deauth / disassoc from the AP ends the link
+// A received frame from the association on: data to the stack once the port is open, EAPOL to the supplicant
+// queue, beacons to the BSS cache, block-ack actions to baQueue, a deauth / disassoc from the AP flags the link
+// lost. Nothing in here issues a firmware command or changes join / security state.
 void MtkWlan::rxFrame(const uint8_t *p, uint32_t len) {
     if (!(rxCtrl & DMA_CTL_LAST_SEC0)) { rxPartial++; return; }
     if (len < 32) { rxBad++; return; }
@@ -147,22 +168,27 @@ void MtkWlan::rxFrame(const uint8_t *p, uint32_t len) {
     if (total && total < len) len = total;
     if (rxd2 & ((1u << 23) | (1u << 24))) { rxBad++; return; }        // AMSDU_ERR, MAX_LEN_ERROR
     if (rxd3 & (1u << 24)) { rxBad++; return; }                       // FCS_ERR
-    uint32_t off = 32;
-    if (rxd1 & (1u << 19)) off += 16;                                 // group 4
-    if (rxd1 & (1u << 16)) off += 16;                                 // group 1
-    if (rxd1 & (1u << 17)) off += 16;                                 // group 2
-    if (rxd1 & (1u << 18)) {                                          // group 3 (P-RXV), group 5 (C-RXV)
-        off += 16;
-        if (rxd1 & (1u << 20)) off += 96;
+    if (rxd1 & ((1u << 25) | (1u << 26))) { rxIcvErr++; return; }     // ICV / CCMP MIC / TKIP MIC error
+    uint32_t secMode = (rxd2 >> 16) & 0x1f;                           // RXD2 SEC_MODE: 0 none, 2 TKIP, 4 CCMP
+    bool decrypted = secMode != 0 && !(rxd1 & ((1u << 23) | (1u << 24)));   // and no CM / CLM error
+    bool hasPn = false;
+    uint64_t pn = 0;
+    if (rxd1 & (1u << 16)) {                                          // group 1: the PN, little-endian in bytes 0..5
+        uint32_t g1 = 32 + ((rxd1 & (1u << 19)) ? 16 : 0);            // after group 4 when present
+        if (g1 + 16 <= len) {
+            for (int i = 5; i >= 0; i--) pn = pn << 8 | p[g1 + i];
+            hasPn = true;
+        }
     }
-    off += 2 * ((rxd2 >> 13) & 7);                                    // HDR_OFFSET pad
+    uint32_t off = rxFrameOffset(rxd1, rxd2);
     if (off + 14 > len) { rxBad++; return; }
     const uint8_t *f = p + off;
     uint32_t flen = len - off;
 
-    if (rxd2 & (1u << 7)) {                                           // HDR_TRANS: already 802.3
+    if (rxd2 & (1u << 7)) {                                           // HDR_TRANS: already 802.3 (translation is off)
         if (rxd2 & (1u << 25)) { rxBad++; return; }
         rxTrans++;
+        if (tgtRsn || !portOpen) { rxTransDrop++; return; }
         if (!memcmp(f + 6, mac, 6)) return;
         deliver(f, f + 6, f + 12, flen - 12);
         return;
@@ -171,20 +197,29 @@ void MtkWlan::rxFrame(const uint8_t *p, uint32_t len) {
     uint16_t fc = le16(f);
     uint8_t type = (fc >> 2) & 3, sub = (fc >> 4) & 0xf;
     if (flen < 24) { rxBad++; return; }
+    if (type == 1) {                                                  // control: BlockAckReq from the AP
+        if (sub == 8 && !memcmp(f + 4, mac, 6) && !memcmp(f + 10, tgtBssid, 6)) rxBar(f, flen);
+        return;
+    }
     if (type == 0) {
-        if (sub == 13 && flen >= 33 && f[24] == 3 && f[25] == 0 && !memcmp(f + 4, mac, 6) && !memcmp(f + 16, tgtBssid, 6))
-            addbaDecline(f, flen);                                    // action: block ack, ADDBA request
+        if ((sub == 8 || sub == 5) && flen >= 36 && !(f[10] & 1) && !memcmp(f + 10, f + 16, 6)) {
+            bssNoteFrame(f, flen, rxRssi(p, len, rxd1));              // beacons keep the cache fresh while associated
+            return;
+        }
+        if (sub == 13 && flen >= 28 && f[24] == 3 && !memcmp(f + 4, mac, 6) && !memcmp(f + 16, tgtBssid, 6))
+            baQueue(f, flen);                                         // action: block ack (ADDBA / DELBA), handled in tick
         if ((sub == 12 || sub == 10) && !memcmp(f + 4, mac, 6) && !memcmp(f + 16, tgtBssid, 6) && flen >= 26) {
             lastDeauth = (uint32_t)sub << 16 | le16(f + 24);         // subtype << 16 | reason
             deauths++;
-            linkLost();
+            deauthPendingReason = le16(f + 24);
+            linkLost();                                               // flags it; the tick tears the link down
         }
         return;
     }
     if (type != 2 || (f[1] & 3) != 2 || memcmp(f + 10, tgtBssid, 6) != 0) return;   // data, FromDS, from our AP
     if (sub & 4) return;                                              // null / no payload
     if (!(f[4] & 1) && memcmp(f + 4, mac, 6)) return;                 // unicast to another station
-    if (f[1] & 0x40) { rxProtected++; return; }
+    bool protFrame = (f[1] & 0x40) != 0;
     uint32_t h = 24;
     if (sub & 8) {
         h += 2;                                                       // QoS control
@@ -194,8 +229,38 @@ void MtkWlan::rxFrame(const uint8_t *p, uint32_t len) {
     if (flen < h + 8) { rxBad++; return; }
     const uint8_t *l = f + h;
     if (memcmp(l, kSnap, 6) && memcmp(l, kBridgeTunnel, 6)) { rxNonSnap++; return; }
+    bool eapol = l[6] == 0x88 && l[7] == 0x8e;
+    bool group = (f[4] & 1) != 0;
+    int pnSlot = -1;
+    if (protFrame) {
+        // decrypted by the hardware (CCMP header and MIC already stripped); the cipher must be the expected one
+        uint32_t want = (group && tgtGroup == 2) ? 2u : 4u;
+        if (!decrypted || secMode != want) { rxCipherMismatch++; return; }
+        if (secMode == 4) {
+            if (hasPn) pnSlot = (group ? 8 : 0) + ((sub & 8) ? (f[24] & 0x7) : 0);   // replay counter: key, TID
+            else rxNoPn++;                                            // no group 1: the PN is not reported
+        }
+    } else if (tgtRsn && !eapol) {
+        rxUnprotDrop++;                                               // plaintext data on a protected association
+        return;
+    }
+    if (eapol) {
+        if (!group && !memcmp(f + 10, tgtBssid, 6)) {
+            rxEapol++;
+            secQueueEapol(l + 8, flen - h - 8);
+        }
+        return;                                                       // never to the front end
+    }
+    if (!portOpen) { rxPortDrop++; return; }
     if (!memcmp(f + 16, mac, 6)) { rxOwn++; return; }                 // our broadcast, relayed back by the AP
-    deliver(f + 4, f + 16, l + 6, flen - h - 6);
+    int tid = -1;
+    uint16_t seq = 0;
+    if ((sub & 8) && !group && ((f[24] >> 5) & 3) != 1) {             // unicast QoS data, not no-ack
+        tid = f[24] & 0xf;
+        seq = le16(f + 22) >> 4;
+        if (tid >= 8 || !rxTid[tid].active) tid = -1;
+    }
+    deliver(f + 4, f + 16, l + 6, flen - h - 6, tid, seq, pnSlot, pn);
 }
 
 // Refuse a block-ack agreement (ADDBA response, status 37 = request declined): no A-MPDU until the
@@ -217,40 +282,78 @@ void MtkWlan::addbaDecline(const uint8_t *f, uint32_t flen) {
     addbaDeclined++;
 }
 
-// Hand one Ethernet frame (DA, SA, ethertype + payload) to the network stack
-void MtkWlan::deliver(const uint8_t *da, const uint8_t *sa, const uint8_t *typeAndPayload, uint32_t n) {
-    if (!netif || !ifEnabled || n < 2 || n > 1502) { rxDropped++; return; }
-    mbuf_t m = allocatePacket(12 + n);
+// PKT_TYPE_TXS (mt7925_queue_rx_skb, mt7925_mac_add_txs_skb): records of 8 dwords from dword 2.
+// TXS0 rate (mode 9:6, nss 13:10, mcs 5:0), BW 31:29, ACK errors 18:16; TXS1 power 7:0; TXS2 WCID 27:16;
+// TXS5 (format 0) tx count 29:25
+void MtkWlan::txStatus(const uint8_t *p, uint32_t len) {
+    for (uint32_t o = 8; o + 32 <= len; o += 32) {
+        uint32_t w[8];
+        for (int i = 0; i < 8; i++) w[i] = le32(p + o + 4 * i);
+        if (((w[0] >> 23) & 3) > 1) continue;                     // TXS_FORMAT
+        if (((w[2] >> 16) & 0xfff) != AP_WCID) continue;
+        txsRecords++;
+        memcpy(txsLast, w, sizeof(txsLast));
+        uint32_t rate = w[0] & 0x3fff;
+        txsMode[(rate >> 6) & 0xf]++;
+        txsMcs[rate & 0xf]++;
+        txsNss[((rate >> 10) & 0xf) & 3]++;
+        txsBw[((w[0] >> 29) & 7) & 3]++;
+        if (w[0] & (7u << 16)) txsAckErr++;
+        txsPwrSum += (int8_t)(w[1] & 0xff);
+        txsCountSum += (w[5] >> 25) & 0x1f;
+        txsDelaySum += w[2] & 0xffff;                              // TXS2 TX_DELAY
+        uint32_t seq = w[1] >> 20;                                 // TXS1 SEQNO: does the hardware number frames?
+        if (txsRecords > 1) txsSeqSpan = (seq - txsLastSeq) & 0xfff;
+        txsLastSeq = seq;
+    }
+}
+
+// Hand one Ethernet frame (DA, SA, ethertype + payload) to the network stack; the PN and its replay-counter
+// slot travel with the frame through the block-ack reorder buffer and are checked when it is delivered in order
+void MtkWlan::deliver(const uint8_t *da, const uint8_t *sa, const uint8_t *typeAndPayload, uint32_t n, int tid,
+                      uint16_t seq, int pnSlot, uint64_t pn) {
+    if (!fe.rx || !ifEnabled || n < 2 || n > 1502) { rxDropped++; return; }
+    mbuf_t m = fe.rx_alloc(fe.ctx, 12 + n);
     if (!m) { rxDropped++; return; }
     uint8_t eh[12];
     memcpy(eh, da, 6);
     memcpy(eh + 6, sa, 6);
     if (mbuf_copyback(m, 0, 12, eh, MBUF_DONTWAIT) || mbuf_copyback(m, 12, n, typeAndPayload, MBUF_DONTWAIT)) {
-        freePacket(m);
+        mbuf_freem(m);
         rxDropped++;
         return;
     }
-    netif->inputPacket(m, 12 + n, IONetworkInterface::kInputOptionQueuePacket);
+    if (tid >= 0) rxBaReorder((uint8_t)tid, seq, m, pnSlot, pn);
+    else inputChecked(m, pnSlot, pn);
+}
+
+void MtkWlan::inputChecked(mbuf_t m, int pnSlot, uint64_t pn) {
+    if (!pnAccept(pnSlot, pn)) { mbuf_freem(m); return; }
+    inputQueue(m);
+}
+
+void MtkWlan::inputQueue(mbuf_t m) {
+    if (!fe.rx) { mbuf_freem(m); return; }
+    fe.rx(fe.ctx, m);
     rxQueued = true;
     rxPackets++;
 }
 
 // ---------------------------------------------------------------- link
 
+// From the RX path: the AP deauthenticated or disassociated us. Only a flag; the tick does the teardown and the
+// manager rejoins (a firmware command from here would re-dispatch the ring slot being read).
 void MtkWlan::linkLost() {
-    if (!linkUp) return;
-    linkUp = false;
-    rejoinAt = ticks + 500;
-    reportLink();
+    if (!linkUp && joinState < 3) return;
+    deauthPending = true;
 }
 
 void MtkWlan::reportLink() {
-    if (!medium) return;
-    bool up = linkUp && ifEnabled;
+    if (!fe.link) return;
+    bool up = linkUp && portOpen && ifEnabled;
     if (up == linkReported) return;
     linkReported = up;
-    setLinkStatus(up ? (kIONetworkLinkValid | kIONetworkLinkActive) : kIONetworkLinkValid, up ? medium : nullptr,
-                  up ? 54000000ULL : 0);
+    fe.link(fe.ctx, up, up ? LINK_SPEED : 0);
 }
 
 void MtkWlan::keepalive() {
@@ -272,6 +375,7 @@ void MtkWlan::timerFired(OSObject *owner, IOTimerEventSource *) {
 }
 
 void MtkWlan::tick() {
+    timer->setTimeoutUS(TICK_US);               // first, so nothing below can stop the clock
     ticks++;
     pollRx();
     uint32_t len = 0;
@@ -280,33 +384,58 @@ void MtkWlan::tick() {
         dispatchRx(p, len);
         rxRelease(rxMcu);
     }
-    if (rxQueued && netif) {
-        netif->flushInputQueue();
+    if (rxQueued && fe.rx_flush) {
+        fe.rx_flush(fe.ctx);
         rxQueued = false;
     }
     if (txStalled && txSlotReady(false)) {
         txStalled = false;
-        if (IOOutputQueue *q = getOutputQueue()) q->service(IOBasicOutputQueue::kServiceAsync);
+        if (fe.tx_space) fe.tx_space(fe.ctx);
     }
-    if (linkUp && ticks - lastTxTick > 10000) keepalive();
-    if (!linkUp && tgtFound && joinedOnce && (int32_t)(ticks - rejoinAt) >= 0) {
-        rejoins++;
-        if (authAssoc(false) == 0) {
-            bssInfo(true);
-            staRec(2, false, aid);
-            linkUp = true;
+    if (deauthPending) {
+        deauthPending = false;
+        uint8_t prev = joinState;
+        uint32_t m2 = supp.m2;                  // before the teardown clears the supplicant
+        bool wasUp = prev == 5;
+        bool shortLink = wasUp && ticks - linkUpAt < 10000;
+        joinTeardown(0);
+        if (!wasUp) {
+            // thrown out during the join: a deauth after our message 2 is the wrong-passphrase signature
+            joinFailures++;
+            cmResult(prev == 4 && m2 ? MTK_JOIN_WRONG_KEY : MTK_JOIN_AP_LEFT);
+        } else if (shortLink) {
+            joinFailures++;                     // connected, then thrown out within 10 s: back off like a failure
+            cmResult(MTK_JOIN_AP_LEFT);
         } else {
-            rejoinAt = ticks + 5000;
+            lastResult = MTK_JOIN_AP_LEFT;      // a long link ended: rejoin soon, no backoff
+            cmFails = 0;
+            rejoinAt = ticks + REJOIN_DELAY_TICKS;
         }
-        reportLink();
+        rejoinPending = true;
+        cmKick = true;
+        char s[96];
+        snprintf(s, sizeof(s), "W6 link lost (deauth / disassoc reason %u in state %u), result %u", deauthPendingReason, prev,
+                 lastResult);
+        step(s);
     }
+    secService();
+    joinService();
+    scanService();
+    cmService();
+    if (linkUp && portOpen && ticks - lastTxTick > 10000) keepalive();
     if (ticks % 100 == 0) txSweep();
+    baService();
+    if (ticks % 10 == 0) rxBaTimeouts();
+    if (ticks % 1000 == 0) bssAge();
+    txInflightMax = txBaState == 2 ? 128 : 32;
+    if (linkUp && portOpen && htActive && txBaOn && txPackets > 200 && (txBaState == 0 || (txBaState == 1 && txBaRequests < 4)) &&
+        (int32_t)(ticks - txBaNextTick) >= 0)
+        txBaRequest();
     if (!w6Pass && ifEnabled && rxPackets && txPackets) {
         w6Pass = true;
         step("W6 pass: en1 passing traffic");
     }
     if (ticks % 1000 == 0) publishW6();
-    timer->setTimeoutUS(TICK_US);
 }
 
 void MtkWlan::publishW6() {
@@ -323,13 +452,34 @@ void MtkWlan::publishW6() {
     setNum("MtkW6TxCapped", txCapped);
     setNum("MtkW8AddbaDeclined", addbaDeclined);
     setNum("MtkW8RxAmsdu", rxAmsdu);
+    if (txsRecords) {
+        char t[200];
+        snprintf(t, sizeof(t), "n %u ackerr %u avg_tries x10 %u avg_pwr x10 %d mode %u/%u/%u/%u/%u nss %u/%u mcs0-9 %u/%u/%u/%u/%u/%u/%u/%u/%u/%u bw %u/%u/%u",
+                 txsRecords, txsAckErr, txsCountSum * 10 / txsRecords, (int)(txsPwrSum * 10 / (int32_t)txsRecords),
+                 txsMode[0], txsMode[1], txsMode[2], txsMode[4], txsMode[8], txsNss[0], txsNss[1],
+                 txsMcs[0], txsMcs[1], txsMcs[2], txsMcs[3], txsMcs[4], txsMcs[5], txsMcs[6], txsMcs[7], txsMcs[8], txsMcs[9],
+                 txsBw[0], txsBw[1], txsBw[2]);
+        setProperty("MtkW9Txs", t);
+        snprintf(t, sizeof(t), "%08x %08x %08x %08x %08x %08x %08x %08x", txsLast[0], txsLast[1], txsLast[2], txsLast[3],
+                 txsLast[4], txsLast[5], txsLast[6], txsLast[7]);
+        setProperty("MtkW9TxsLast", t);
+        setNum("MtkW9TxsAvgDelay", txsDelaySum / txsRecords);
+        setNum("MtkW9TxsSeqSpan", txsSeqSpan);
+    }
+    setNum("MtkW9TxFreeHeaders", tfHeaders);
+    setNum("MtkW9TxFreeAttempts", tfAttempts);
+    setNum("MtkW9TxFreeStatErr", tfStatErr);
+    char b[200];
+    snprintf(b, sizeof(b), "rx sessions %u buffered %u dup %u timeout %u bar %u delba %u | tx state %u req %u status %u win %u ssn %u | rc %d",
+             baRxSessions, baBuffered, baDup, baTimeoutRelease, barRx, delbaRx, txBaState, txBaRequests, baTxStatus, txBaWin,
+             txBaSsn, (int)baLastRc);
+    setProperty("MtkW9Ba", b);
     setNum("MtkW6TxInFlightPeak", txInFlightPeak);
     setNum("MtkW6RxPackets", rxPackets);
     setNum("MtkW6RxBad", rxBad);
     setNum("MtkW6RxPartial", rxPartial);
     setNum("MtkW6RxTrans", rxTrans);
     setNum("MtkW6RxNonSnap", rxNonSnap);
-    setNum("MtkW6RxProtected", rxProtected);
     setNum("MtkW6RxOwn", rxOwn);
     setNum("MtkW6RxDropped", rxDropped);
     setNum("MtkW6RxFrames", rxFrames);
@@ -337,8 +487,8 @@ void MtkWlan::publishW6() {
     setNum("MtkW6LastDeauth", lastDeauth);
     setNum("MtkW6Rejoins", rejoins);
     setNum("MtkW6Keepalives", keepalives);
-    setNum("MtkW6Link", (linkUp ? 1 : 0) | (ifEnabled ? 2 : 0) | (linkReported ? 4 : 0));
-    char s[160];
+    setNum("MtkW6Link", (linkUp ? 1 : 0) | (ifEnabled ? 2 : 0) | (linkReported ? 4 : 0) | (portOpen ? 8 : 0));
+    char s[200];
     size_t k = 0;
     s[0] = 0;
     for (int t = 0; t < 32 && k + 12 < sizeof(s); t++)
@@ -349,98 +499,196 @@ void MtkWlan::publishW6() {
     for (int e = 0; e < 256 && k + 12 < sizeof(s); e++)
         if (evCount[e]) k += snprintf(s + k, sizeof(s) - k, "%s%02x:%u", k ? " " : "", e, evCount[e]);
     setProperty("MtkW6EventIds", s[0] ? s : "none");
+    // 0.9.0 machines
+    snprintf(s, sizeof(s), "scans %u fails %u bss %d running %u wanted %u userpending %u", scans, scanFails, nBss, scanRunning,
+             scanWanted, userScanPending);
+    setProperty("MtkW1Scan", s);
+    snprintf(s, sizeof(s), "state %u joins %u fails %u last %u rejoins %u authtx %u assoctx %u tries %u", joinState, joins,
+             joinFailures, lastResult, rejoins, authTx, assocTx, joinTries);
+    setProperty("MtkW1Join", s);
+    snprintf(s, sizeof(s), "m1 %u m2 %u m3 %u m4 %u g1 %u g2 %u badmic %u replays %u reinst %u pnreplay %u nopn %u icv %u mismatch %u unprot %u portdrop %u trans %u eapol rx %u tx %u qdrop %u installs %u/%u",
+             supp.m1, supp.m2, supp.m3, supp.m4, supp.g1, supp.g2, supp.bad_mic, supp.replays, supp.reinstall_skipped, rxPnReplays, rxNoPn,
+             rxIcvErr, rxCipherMismatch, rxUnprotDrop, rxPortDrop, rxTransDrop, rxEapol, txEapolCount, eapolQDropped, secInstalls,
+             secInstallFails);
+    setProperty("MtkW2Sec", s);
+    snprintf(s, sizeof(s), "want %u pmk %u autoopen %u (%u ssids) fails %u runs %u switch %u disc %u rejoinpend %u", wantActive, wantHasPmk,
+             autoOpen, nAutoOpenSsids, cmFails, cmRuns, switchPending, disconnectPending, rejoinPending);
+    setProperty("MtkCm", s);
+    snprintf(s, sizeof(s), "indispatch %u timeouts %u fails %u dead %u", uniCmdInDispatch, uniCmdTimeouts, uniCmdFails, fwDead);
+    setProperty("MtkW2Cmd", s);
 }
 
-// Called at the end of start() once W5 passed: timer, medium, network interface
+// Called at the end of start() once the hardware is ready: the Ethernet front end (medium, interface, link
+// down), then the timer, armed whatever the front end did, so the machines and the user client always run
 int MtkWlan::netStage() {
     IOWorkLoop *wl = getWorkLoop();
     if (!wl) { step("W6 fail: no work loop"); return -1; }
     timer = IOTimerEventSource::timerEventSource(this, &MtkWlan::timerFired);
     if (!timer || wl->addEventSource(timer) != kIOReturnSuccess) { step("W6 fail: timer"); return -2; }
 
-    OSDictionary *md = OSDictionary::withCapacity(1);
-    medium = IONetworkMedium::medium(kIOMediumEthernetAuto, 54000000ULL);
-    if (!md || !medium || !IONetworkMedium::addMedium(md, medium) || !publishMediumDictionary(md)) {
-        OSSafeReleaseNULL(md);
-        step("W6 fail: medium dictionary");
-        return -3;
-    }
-    md->release();
-
-    if (!attachInterface((IONetworkInterface **)&netif, false)) { step("W6 fail: attachInterface"); return -4; }
-    netif->registerService();
+    int fr = startFrontEnd();
+    setNum("MtkW0FrontEnd", (uint32_t)fr);
     timer->setTimeoutUS(TICK_US);
-    step("W6 interface attached (link up, waiting for DHCP)");
+    if (fr) { step("W6 fail: Ethernet front end (MtkWlanEth) did not start; machines running without it"); return -4; }
+    step("W6 interface attached (link down until a network is joined)");
     return 0;
 }
 
-// ---------------------------------------------------------------- IOEthernetController
-
-bool MtkWlan::createWorkLoop() {
-    workLoop = IOWorkLoop::workLoop();
-    return workLoop != nullptr;
+// The front end is a child in the service plane, found by class name so the core needs no MtkWlanEth header.
+// A front end that fails start() stays attached and referenced: IONetworkController::start may already have
+// put its command gate on our work loop, so it is never freed while the core runs.
+int MtkWlan::startFrontEnd() {
+    OSObject *o = OSMetaClass::allocClassWithName("MtkWlanEth");
+    IOService *s = OSDynamicCast(IOService, o);
+    if (!s) { OSSafeReleaseNULL(o); return -1; }
+    if (!s->init() || !s->attach(this)) { s->release(); return -2; }
+    frontEnd = s;
+    return s->start(this) ? 0 : -3;
 }
+
+// ---------------------------------------------------------------- ops table (MtkCoreApi.h)
 
 IOWorkLoop *MtkWlan::getWorkLoop() const {
     return workLoop;
 }
 
-IOOutputQueue *MtkWlan::createOutputQueue() {
-    return IOGatedOutputQueue::withTarget(this, getWorkLoop(), TXQ_CAPACITY);
-}
+const mtk_core_ops MtkWlan::kOps = {
+    MTK_CORE_API_V1, sizeof(mtk_core_ops), &MtkWlan::opSetCallbacks, &MtkWlan::opTx, &MtkWlan::opSetEnabled,
+    &MtkWlan::opGetMac, &MtkWlan::opGetLinkInfo,
+};
 
-IOReturn MtkWlan::getHardwareAddress(IOEthernetAddress *addr) {
-    memcpy(addr->bytes, mac, 6);
-    return kIOReturnSuccess;
-}
+const mtk_core_ops_v2 MtkWlan::kOpsV2 = {
+    {MTK_CORE_API_V2, sizeof(mtk_core_ops_v2), &MtkWlan::opSetCallbacks, &MtkWlan::opTx, &MtkWlan::opSetEnabled,
+     &MtkWlan::opGetMac, &MtkWlan::opGetLinkInfo},
+    &MtkWlan::opScan, &MtkWlan::opResults, &MtkWlan::opJoin, &MtkWlan::opDisconnect, &MtkWlan::opStatus,
+};
 
-IOReturn MtkWlan::enable(IONetworkInterface *) {
-    ifEnabled = true;
-    if (IOOutputQueue *q = getOutputQueue()) {
-        q->setCapacity(TXQ_CAPACITY);
-        q->start();
+IOReturn MtkWlan::callPlatformFunction(const OSSymbol *functionName, bool waitForFunction, void *param1, void *param2,
+                                       void *param3, void *param4) {
+    if (functionName && functionName->isEqualTo(MTK_CORE_OPS_V1)) {
+        if (!param1 || !param2) return kIOReturnBadArgument;
+        *(const mtk_core_ops **)param1 = &kOps;
+        *(void **)param2 = this;
+        return kIOReturnSuccess;
     }
-    reportLink();
-    return kIOReturnSuccess;
-}
-
-IOReturn MtkWlan::disable(IONetworkInterface *) {
-    ifEnabled = false;
-    if (IOOutputQueue *q = getOutputQueue()) {
-        q->stop();
-        q->setCapacity(0);
-        q->flush();
+    if (functionName && functionName->isEqualTo(MTK_CORE_OPS_V2)) {
+        if (!param1 || !param2) return kIOReturnBadArgument;
+        *(const mtk_core_ops_v2 **)param1 = &kOpsV2;
+        *(void **)param2 = this;
+        return kIOReturnSuccess;
     }
-    reportLink();
+    return IOService::callPlatformFunction(functionName, waitForFunction, param1, param2, param3, param4);
+}
+
+// Register or remove the front end under the gate, so a running tick never sees half a table. A v1 table
+// (MtkWlanEth) or a v2 table (scan_done / join_result added) is accepted.
+int MtkWlan::opSetCallbacks(void *core, const mtk_fe_callbacks *cb) {
+    MtkWlan *self = static_cast<MtkWlan *>(core);
+    if (cb) {
+        bool v1 = cb->version == MTK_CORE_API_V1 && cb->size >= sizeof(mtk_fe_callbacks);
+        bool v2 = cb->version == MTK_CORE_API_V2 && cb->size >= sizeof(mtk_fe_callbacks_v2);
+        if ((!v1 && !v2) || !cb->rx_alloc || !cb->rx || !cb->rx_flush || !cb->link || !cb->tx_space) return -1;
+    }
+    if (!self->workLoop) return -1;
+    return self->workLoop->runAction(&MtkWlan::gatedSetCallbacks, self, (void *)cb) == kIOReturnSuccess ? 0 : -1;
+}
+
+IOReturn MtkWlan::gatedSetCallbacks(OSObject *owner, void *arg, void *, void *, void *) {
+    MtkWlan *self = static_cast<MtkWlan *>(owner);
+    const mtk_fe_callbacks *cb = static_cast<const mtk_fe_callbacks *>(arg);
+    if (cb) {
+        if (self->fe.rx) return kIOReturnBusy;  // one front end at a time
+        memcpy(&self->fe, cb, sizeof(self->fe));
+        if (cb->version == MTK_CORE_API_V2) {
+            const mtk_fe_callbacks_v2 *v2 = reinterpret_cast<const mtk_fe_callbacks_v2 *>(cb);
+            self->feScanDone = v2->scan_done;
+            self->feJoinResult = v2->join_result;
+        } else {
+            self->feScanDone = nullptr;
+            self->feJoinResult = nullptr;
+        }
+        return kIOReturnSuccess;
+    }
+    bzero(&self->fe, sizeof(self->fe));
+    self->feScanDone = nullptr;
+    self->feJoinResult = nullptr;
+    self->ifEnabled = false;
+    self->linkReported = false;
+    self->rxQueued = false;
     return kIOReturnSuccess;
 }
 
-IOReturn MtkWlan::setPromiscuousMode(bool) { return kIOReturnSuccess; }
-IOReturn MtkWlan::setMulticastMode(bool) { return kIOReturnSuccess; }
-IOReturn MtkWlan::setMulticastList(IOEthernetAddress *, UInt32) { return kIOReturnSuccess; }
-const OSString *MtkWlan::newVendorString() const { return OSString::withCString("MediaTek"); }
-const OSString *MtkWlan::newModelString() const { return OSString::withCString("MT7925 (MtkWlan)"); }
+int MtkWlan::opTx(void *core, mbuf_t m) {
+    return static_cast<MtkWlan *>(core)->txEthernet(m);
+}
 
-// Ethernet -> 802.11 data: ToDS, A1 BSSID, A2 us, A3 DA, LLC/SNAP + ethertype, then the payload
-UInt32 MtkWlan::outputPacket(mbuf_t m, void *) {
+void MtkWlan::opSetEnabled(void *core, int enabled) {
+    MtkWlan *self = static_cast<MtkWlan *>(core);
+    self->ifEnabled = enabled != 0;
+    self->reportLink();
+}
+
+int MtkWlan::opGetMac(void *core, uint8_t out[6]) {
+    memcpy(out, static_cast<MtkWlan *>(core)->mac, 6);
+    return 0;
+}
+
+int MtkWlan::opGetLinkInfo(void *core, mtk_link_info *out) {
+    MtkWlan *self = static_cast<MtkWlan *>(core);
+    bzero(out, sizeof(*out));
+    out->up = self->linkUp;
+    out->enabled = self->ifEnabled;
+    memcpy(out->bssid, self->tgtBssid, 6);
+    out->channel = self->tgtCh;
+    out->bw = self->htActive ? self->chBw : 0;
+    out->center = out->bw ? self->chCenter : self->tgtCh;
+    out->nss = self->htActive ? self->apNss : 1;
+    out->ht = self->htActive;
+    out->vht = self->vhtActive;
+    out->aid = self->aid;
+    strlcpy(out->ssid, self->tgtSsid, sizeof(out->ssid));
+    out->speed = self->linkUp && self->portOpen && self->ifEnabled ? LINK_SPEED : 0;
+    return 0;
+}
+
+// v2 (gate held by the caller: a front end on the shared work loop, or runAction)
+int MtkWlan::opScan(void *core) { return static_cast<MtkWlan *>(core)->coreScan(); }
+int MtkWlan::opResults(void *core, mtk_scan_result *out, uint32_t max, uint32_t *count) {
+    if (!out || !count) return -1;
+    *count = static_cast<MtkWlan *>(core)->coreResults(out, max);
+    return 0;
+}
+int MtkWlan::opJoin(void *core, const mtk_join_params *p) { return static_cast<MtkWlan *>(core)->coreJoin(p); }
+int MtkWlan::opDisconnect(void *core) { return static_cast<MtkWlan *>(core)->coreDisconnect(); }
+int MtkWlan::opStatus(void *core, mtk_status *out) {
+    if (!out) return -1;
+    static_cast<MtkWlan *>(core)->coreStatus(out);
+    return 0;
+}
+
+// Ethernet -> 802.11 data: ToDS, A1 BSSID, A2 us, A3 DA, LLC/SNAP + ethertype, then the payload.
+// The 0.7.0 outputPacket; the front end frees m unless the result is MTK_TX_STALL. Nothing leaves before the
+// port is open; once the PTK is installed every frame goes out protected (hardware CCMP).
+int MtkWlan::txEthernet(mbuf_t m) {
     uint32_t len = (uint32_t)mbuf_pkthdr_len(m);
-    if (!linkUp || len < 14 || len > 1514) {
-        freePacket(m);
+    if (!linkUp || !portOpen || len < 14 || len > 1514) {
+        if (linkUp && !portOpen) txPortDrop++;
         txDrop++;
-        return kIOReturnOutputDropped;
+        return MTK_TX_DROPPED;
     }
     if (!txSlotReady(false)) {
         txStall++;
         txStalled = true;
-        return kIOReturnOutputStall;
+        return MTK_TX_STALL;
     }
     uint8_t eh[14];
     mbuf_copydata(m, 0, 14, eh);
     uint8_t *f = txData.bufs.va + txData.head * txData.bufSize + 128;
     bool qos = htActive;                        // WMM was negotiated with the HT association
+    bool protect = ptkInstalled;
     uint32_t h = qos ? 26 : 24;
     f[0] = qos ? 0x88 : 0x08;                   // QoS data / data
-    f[1] = 0x01;                                // ToDS
+    f[1] = (uint8_t)(0x01 | (protect ? 0x40 : 0));   // ToDS, Protected once the keys are in the card
     f[2] = f[3] = 0;
     memcpy(f + 4, tgtBssid, 6);
     memcpy(f + 10, mac, 6);
@@ -453,8 +701,9 @@ UInt32 MtkWlan::outputPacket(mbuf_t m, void *) {
     mbuf_copydata(m, 14, len - 14, f + h + 8);
     bool mc = eh[0] & 1;
     uint8_t rate = mc ? RATE_IDX_OFDM12 : (dataRate ? dataRate : htActive ? 0 : RATE_IDX_OFDM24);
-    txQueue(h + 8 + len - 14, LMAC_AC_BE, 2, qos ? 8 : 0, rate, mc, false, h);
+    bool sample = !mc && (++txsSampleSeq & 63) == 0;
+    // TXD3 BCM stays clear: addr1 is the AP (mt7925_mac_write_txwi derives it from addr1), only the rate follows the DA
+    txQueue(h + 8 + len - 14, LMAC_AC_BE, 2, qos ? 8 : 0, rate, false, sample, h, 0, protect);
     txPackets++;
-    freePacket(m);
-    return kIOReturnOutputSuccess;
+    return MTK_TX_OK;
 }
