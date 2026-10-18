@@ -12,7 +12,7 @@ Everything below was measured on one laptop (Legion 5 15IAX10, OpenCore 1.0.8) o
 
 | Version | What it adds | Tested on | Result |
 |---|---|---|---|
-| 0.11.0 | core ops v4: `set_mac` changes the station address after bring-up (the firmware station interface is re-added with it), so a native front end can apply the per-network private address macOS picks; `MtkMacAddr`, `MtkMacChanges` properties | macOS 26.7.1 (25G241) | the native front end MtkWlanNative joins through macOS with a private address, DHCP works on it; Ethernet front end unchanged |
+| 0.11.0 | core ops v4: `set_mac` changes the station address after bring-up (the firmware station interface is re-added with it), so a native front end can apply the per-network private address macOS picks; `MtkMacAddr`, `MtkMacChanges` properties | macOS 26.7.1 (25G241) | with the native front end MtkWlanNative 0.4.9: Wi-Fi menu, macOS-driven joins with a private address, auto-join at boot, link held for ten quiet minutes; Ethernet front end unchanged |
 | 0.10.0 | core ops v3 (`set_mode`, `get_bss`, `get_channels`, `tx_bytes`), front-end selection (`MtkFrontEnd`: Ethernet, native front end optional) with Ethernet fallback, `mtkwifi` shows the front end | macOS 26.7.1 (25G241) | 192.7 Mb/s down, 134.6 Mb/s up, 16 ms idle ping, 0 % loss; same auto join at boot |
 | 0.9.0 | scan and join machines, `mtkwifi` tool, saved networks, auto join at boot, WPA2-PSK code | macOS 26.7.1 (25G241) | 190.8 Mb/s down, 174.8 Mb/s up, 16 ms idle ping, 0 % loss; joins the network by itself at boot |
 | 0.8.0 | core / front end split, native macOS build | macOS 26.7.1 | 195 / 97 Mb/s |
@@ -24,7 +24,7 @@ Everything below was measured on one laptop (Legion 5 15IAX10, OpenCore 1.0.8) o
 
 ## What it can't do
 
-- **No Wi-Fi menu with this kext alone.** macOS sees an Ethernet card. Networks are chosen with the `mtkwifi` command line tool, there is no Wi-Fi icon, no Wi-Fi pane in System Settings, no AirDrop, no Continuity. The native front end that fixes this is a second kext, MtkWlanNative (github.com/watchthelight-labs/mt7925-hackintosh-wifi-native), built against the same core ops table; with it macOS drives scans and joins itself.
+- **No Wi-Fi menu with this kext alone.** macOS sees an Ethernet card. Networks are chosen with the `mtkwifi` command line tool, there is no Wi-Fi icon, no Wi-Fi pane in System Settings, no AirDrop, no Continuity. The native front end is a second kext, [MtkWlanNative](https://github.com/watchthelight-labs/mt7925-hackintosh-wifi-native) (0.4.9, macOS Tahoe 26.7.1 only), built against the same core ops table: with it the Wi-Fi menu works, macOS runs the scans and joins, saves networks and auto-joins at boot.
 - **Not joinable:** WPA3-SAE only, WPA2 with PSK-SHA256 only, networks that require management frame protection, WPA (TKIP pairwise), enterprise (802.1X). `mtkwifi list` marks these.
 - No roaming between access points of one network. No HE (802.11ax) or EHT; the association is VHT at 80 MHz.
 - No sleep and wake handling. The laptop this runs on has sleep disabled.
