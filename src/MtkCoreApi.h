@@ -152,6 +152,24 @@ struct mtk_core_ops_v3 {
     int (*tx_bytes)(void *core, const uint8_t *frame, uint32_t len);
 };
 
+// ---- version 4 (0.11.0): the station address can change after bring-up ----------------------------------------------
+// MTK_CORE_OPS_V4 returns a struct mtk_core_ops_v4 whose first member is the v3 table (version 4 in it) and accepts
+// struct mtk_fe_callbacks_v2 with version MTK_CORE_API_V4 (same callbacks). macOS gives a Wi-Fi interface a private
+// address per network through the native front end (IO80211MacAddressAgent, slot 470 on 25G241), and the firmware
+// accepts unicast only for the own-MAC it was given in DEV_INFO: without this the station associates and DHCP never
+// sees a reply (I-058).
+#define MTK_CORE_OPS_V4      "mtk-core-ops-v4"
+#define MTK_CORE_API_V4      4
+
+struct mtk_core_ops_v4 {
+    struct mtk_core_ops_v3 v3;
+    // Change the station address: an association ends first (link callback as usual; the manager rejoins the wanted
+    // network with the new address), then the firmware station interface is removed and added again with it. Gate
+    // held, synchronous (milliseconds; 3 s on a firmware timeout). 0 on success or when unchanged, -1 bad argument
+    // (multicast or all-zero), -2 the firmware refused it: the old address stays.
+    int (*set_mac)(void *core, const uint8_t mac[6]);
+};
+
 #ifdef __cplusplus
 }
 #endif

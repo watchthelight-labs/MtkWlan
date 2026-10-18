@@ -123,6 +123,7 @@ private:
     void pollRx();
     void mtkParseFrame(const uint8_t *p, uint32_t len);
     int hwInit();
+    int devInfo(bool enable);
     int scanStart();
     void scanService();
     void bssAge();
@@ -163,6 +164,7 @@ private:
     int coreScan();
     int coreJoin(const mtk_join_params *p);
     int coreDisconnect();
+    int coreSetMac(const uint8_t m[6]);
     void coreStatus(mtk_status *out);
     uint32_t coreResults(mtk_scan_result *out, uint32_t max);
     // MtkSec.cpp: W2 WPA2-PSK glue
@@ -197,6 +199,8 @@ private:
     static const mtk_core_ops kOps;
     static const mtk_core_ops_v2 kOpsV2;
     static const mtk_core_ops_v3 kOpsV3;
+    static const mtk_core_ops_v4 kOpsV4;
+    static int opSetMac(void *core, const uint8_t mac[6]);
     static int opSetMode(void *core, uint32_t mode, uint32_t flags);
     static int opGetBss(void *core, uint32_t index, mtk_bss_info *out);
     static int opGetChannels(void *core, uint8_t *list, uint32_t max, uint32_t *count);
@@ -273,6 +277,7 @@ private:
     uint8_t mcuSeq = 0;
 
     uint8_t mac[6] = {};
+    uint32_t macChanges = 0;                   // station address changes applied through set_mac (MtkMacChanges)
     bool scanDone = false;
     uint32_t rxFrames = 0, rxBeacons = 0, rxOther = 0;
 

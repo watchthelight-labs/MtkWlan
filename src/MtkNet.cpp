@@ -603,6 +603,14 @@ const mtk_core_ops_v3 MtkWlan::kOpsV3 = {
     &MtkWlan::opSetMode, &MtkWlan::opGetBss, &MtkWlan::opGetChannels, &MtkWlan::opTxBytes,
 };
 
+const mtk_core_ops_v4 MtkWlan::kOpsV4 = {
+    {{{MTK_CORE_API_V4, sizeof(mtk_core_ops_v4), &MtkWlan::opSetCallbacks, &MtkWlan::opTx, &MtkWlan::opSetEnabled,
+       &MtkWlan::opGetMac, &MtkWlan::opGetLinkInfo},
+      &MtkWlan::opScan, &MtkWlan::opResults, &MtkWlan::opJoin, &MtkWlan::opDisconnect, &MtkWlan::opStatus},
+     &MtkWlan::opSetMode, &MtkWlan::opGetBss, &MtkWlan::opGetChannels, &MtkWlan::opTxBytes},
+    &MtkWlan::opSetMac,
+};
+
 IOReturn MtkWlan::callPlatformFunction(const OSSymbol *functionName, bool waitForFunction, void *param1, void *param2,
                                        void *param3, void *param4) {
     if (functionName && functionName->isEqualTo(MTK_CORE_OPS_V1)) {
@@ -623,6 +631,12 @@ IOReturn MtkWlan::callPlatformFunction(const OSSymbol *functionName, bool waitFo
         *(void **)param2 = this;
         return kIOReturnSuccess;
     }
+    if (functionName && functionName->isEqualTo(MTK_CORE_OPS_V4)) {
+        if (!param1 || !param2) return kIOReturnBadArgument;
+        *(const mtk_core_ops_v4 **)param1 = &kOpsV4;
+        *(void **)param2 = this;
+        return kIOReturnSuccess;
+    }
     if (functionName && functionName->isEqualTo(MTK_CORE_FE_DECLINED)) {
         feDeclined = true;                      // the tick's frontEndService starts the Ethernet front end
         return kIOReturnSuccess;
@@ -636,7 +650,8 @@ int MtkWlan::opSetCallbacks(void *core, const mtk_fe_callbacks *cb) {
     MtkWlan *self = static_cast<MtkWlan *>(core);
     if (cb) {
         bool v1 = cb->version == MTK_CORE_API_V1 && cb->size >= sizeof(mtk_fe_callbacks);
-        bool v2 = (cb->version == MTK_CORE_API_V2 || cb->version == MTK_CORE_API_V3) && cb->size >= sizeof(mtk_fe_callbacks_v2);
+        bool v2 = (cb->version == MTK_CORE_API_V2 || cb->version == MTK_CORE_API_V3 || cb->version == MTK_CORE_API_V4) &&
+                  cb->size >= sizeof(mtk_fe_callbacks_v2);
         if ((!v1 && !v2) || !cb->rx_alloc || !cb->rx || !cb->rx_flush || !cb->link || !cb->tx_space) return -1;
     }
     if (!self->workLoop) return -1;
@@ -694,6 +709,31 @@ int MtkWlan::opGetChannels(void *core, uint8_t *list, uint32_t max, uint32_t *co
 }
 int MtkWlan::opTxBytes(void *core, const uint8_t *frame, uint32_t len) {
     return static_cast<MtkWlan *>(core)->txEthernetBytes(frame, len);
+}
+
+// v4 (gate held by the caller): the station address the front end was given (macOS's private address per network)
+int MtkWlan::opSetMac(void *core, const uint8_t m[6]) { return static_cast<MtkWlan *>(core)->coreSetMac(m); }
+int MtkWlan::coreSetMac(const uint8_t m[6]) {
+    if (!m || (m[0] & 1) || !(m[0] | m[1] | m[2] | m[3] | m[4] | m[5])) return -1;
+    if (!memcmp(mac, m, 6)) return 0;
+    if (joinState) joinTeardown(3);                 // reason 3, leaving; the manager rejoins the wanted network with the new address
+    uint8_t old[6];
+    memcpy(old, mac, 6);
+    devInfo(false);
+    memcpy(mac, m, 6);
+    int rc = devInfo(true);
+    if (rc) {
+        memcpy(mac, old, 6);
+        devInfo(true);
+        setNum("MtkMacChangeRefused", (uint32_t)rc);
+        return -2;
+    }
+    char s[18];
+    snprintf(s, sizeof(s), "%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    setProperty("MtkMacAddr", s);
+    setNum("MtkMacChanges", ++macChanges);
+    cmKick = true;
+    return 0;
 }
 
 void MtkWlan::opSetEnabled(void *core, int enabled) {

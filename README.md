@@ -12,6 +12,7 @@ Everything below was measured on one laptop (Legion 5 15IAX10, OpenCore 1.0.8) o
 
 | Version | What it adds | Tested on | Result |
 |---|---|---|---|
+| 0.11.0 | core ops v4: `set_mac` changes the station address after bring-up (the firmware station interface is re-added with it), so a native front end can apply the per-network private address macOS picks; `MtkMacAddr`, `MtkMacChanges` properties | macOS 26.7.1 (25G241) | the native front end MtkWlanNative joins through macOS with a private address, DHCP works on it; Ethernet front end unchanged |
 | 0.10.0 | core ops v3 (`set_mode`, `get_bss`, `get_channels`, `tx_bytes`), front-end selection (`MtkFrontEnd`: Ethernet, native front end optional) with Ethernet fallback, `mtkwifi` shows the front end | macOS 26.7.1 (25G241) | 192.7 Mb/s down, 134.6 Mb/s up, 16 ms idle ping, 0 % loss; same auto join at boot |
 | 0.9.0 | scan and join machines, `mtkwifi` tool, saved networks, auto join at boot, WPA2-PSK code | macOS 26.7.1 (25G241) | 190.8 Mb/s down, 174.8 Mb/s up, 16 ms idle ping, 0 % loss; joins the network by itself at boot |
 | 0.8.0 | core / front end split, native macOS build | macOS 26.7.1 | 195 / 97 Mb/s |
@@ -23,7 +24,7 @@ Everything below was measured on one laptop (Legion 5 15IAX10, OpenCore 1.0.8) o
 
 ## What it can't do
 
-- **No Wi-Fi menu.** macOS sees an Ethernet card. Networks are chosen with the `mtkwifi` command line tool, there is no Wi-Fi icon, no Wi-Fi pane in System Settings, no AirDrop, no Continuity. A native front end that fixes this is the next big piece of work and does not exist yet.
+- **No Wi-Fi menu with this kext alone.** macOS sees an Ethernet card. Networks are chosen with the `mtkwifi` command line tool, there is no Wi-Fi icon, no Wi-Fi pane in System Settings, no AirDrop, no Continuity. The native front end that fixes this is a second kext, MtkWlanNative (github.com/watchthelight-labs/MtkWlanNative), built against the same core ops table; with it macOS drives scans and joins itself.
 - **Not joinable:** WPA3-SAE only, WPA2 with PSK-SHA256 only, networks that require management frame protection, WPA (TKIP pairwise), enterprise (802.1X). `mtkwifi list` marks these.
 - No roaming between access points of one network. No HE (802.11ax) or EHT; the association is VHT at 80 MHz.
 - No sleep and wake handling. The laptop this runs on has sleep disabled.
@@ -83,7 +84,29 @@ Set in `Info.plist` under the `MtkWlan` personality (edit the copy inside the ke
 
 ## Diagnostics
 
-`ioreg -r -c MtkWlan -l -w0` holds every counter the driver keeps: `MtkState`, `MtkScan` (the cached networks with channel, RSSI and security), `MtkW1Join` (join results), `MtkW2Sec` (handshake messages, MIC failures, replays, drops), `MtkCm` (what the connection manager decided), `MtkW2Cmd` (firmware command timeouts), and the data path and block-ack sets. It never contains a key or passphrase. `mtkwifi status --json` gives the same picture from user space. `tools/wifi.sh` runs the measurements the table above came from. The `docs/HOW-IT-WORKS.md` property list explains each one.
+`ioreg -r -c MtkWlan -l -w0` holds every counter the driver keeps: `MtkState`, `MtkScan` (the cached networks with channel, RSSI and security), `MtkW1Join` (join results), `MtkW2Sec` (handshake messages, MIC failures, replays, drops), `MtkCm` (what the connection manager decided), `MtkW2Cmd` (firmware command timeouts), and the data path and block-ack sets. It never contains a key or passphrase. `mtkwifi status --json` gives the same picture from user space. `tools/wifi.sh` runs the measurements the table above came from. `tools/mtk-report.sh` packs all of it for a bug report (see the section below). The `docs/HOW-IT-WORKS.md` property list explains each one.
+
+## Other MediaTek cards: collecting logs and reporting back
+
+This driver has been run on one card (MT7925, PCI `14c3:7925`, subsystem `17aa:e0ff`, in one laptop). Other MediaTek
+Wi-Fi 6E/7 cards (MT7921, MT7922, other MT7925 boards) share the MCU command set the firmware loader and the scan/join
+code use, but each needs its own firmware files (`firmware/`, see `gen_firmware.py`) and may differ in the PCIe
+register map, DMA ring layout and TX power tables. If you try the kext on a different card, I want the result either way.
+
+1. Install the kext as above and reboot. Wait a minute after the desktop appears.
+2. Run `bash tools/mtk-report.sh` (no sudo). It writes `~/Desktop/mtk-report-<date>.tar.gz` with: the PCI ids of the
+   MediaTek device, loaded kexts, every `ioreg` property of `MtkWlan` (and `MtkWlanNative` if installed), interfaces and
+   routes, `mtkwifi status --json` and `mtkwifi list`, the Wi-Fi system profile, the kernel log lines of the driver and
+   the IO80211 family, the Wi-Fi daemons' log, and the last three kernel panic reports if any. MAC addresses and SSIDs
+   are replaced by placeholders (`--no-redact` keeps them; `--minutes N` widens the log window, default 30). Nothing in
+   it is a key or passphrase.
+3. Open an issue at github.com/watchthelight-labs/MtkWlan/issues with the archive attached and three lines: the card
+   (PCI ids), the macOS build (`sw_vers`), and what happened (did the kext load, did `mtkwifi list` show networks, did a
+   join get a lease). If the machine panicked, say what was on screen; the report includes the panic file.
+
+What the properties mean is in `docs/HOW-IT-WORKS.md`. The usual first failures on a new card are `MtkFwState` (firmware
+not found or rejected: the file names in `Info.plist` and `gen_firmware.py` are for the MT7925) and `MtkW2Cmd` timeouts
+(the MCU did not answer: register map or DMA layout).
 
 ## Building
 

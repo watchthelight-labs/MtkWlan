@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.11.0 (2026-10-18)
+
+- Core ops table v4 (`MtkCoreApi.h`): `set_mac` changes the station address after bring-up. The association ends first, the firmware station interface is removed and added again with the new address, and the manager rejoins the wanted network. macOS gives a Wi-Fi interface a private address per network; without this the station associated with the old address in the firmware and DHCP never saw a reply.
+- `MtkMacAddr` and `MtkMacChanges` properties; `MtkMacChangeRefused` when the firmware rejects an address.
+- `tools/mtk-report.sh`: one archive with everything a bug report needs, MAC addresses and SSIDs redacted.
+- Ethernet front end unchanged. Tested with the native front end MtkWlanNative 0.4.1 on macOS 26.7.1 (25G241): macOS-driven join with a private address, DHCP lease on it.
+
 ## 0.10.0 (2026-10-17)
 
 - Core ops table v3 (`MtkCoreApi.h`): `set_mode`, `get_bss`, `get_channels` and `tx_bytes`, so a native Wi-Fi front end can drive the core without a C++ link.

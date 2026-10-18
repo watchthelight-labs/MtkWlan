@@ -400,6 +400,34 @@ void MtkWlan::publishScan() {
     setNum("MtkW1Bss", (uint32_t)nBss);
 }
 
+// The station interface (mt76_connac_mcu_uni_add_dev, NL80211_IFTYPE_STATION): DEV_INFO with our own MAC, then the
+// idle BSS_INFO basic record. The firmware accepts unicast only for this address, so a station address change
+// (coreSetMac) removes the interface and adds it again with the new one, the way Linux re-adds the vif.
+int MtkWlan::devInfo(bool enable) {
+    uint8_t dev[16] = {};
+    dev[0] = 0;                 // omac_idx
+    dev[1] = 0xff;              // band_idx (mt7925 uses 0xff)
+    put16(dev + 4, 0);          // DEV_INFO_ACTIVE
+    put16(dev + 6, 12);
+    dev[8] = enable ? 1 : 0;    // active
+    dev[9] = 0;                 // link_idx
+    memcpy(dev + 10, mac, 6);
+    int rc = uniCmd(UNI_DEV_INFO_UPDATE, dev, sizeof(dev), false, nullptr, 0, nullptr);
+
+    uint8_t bssb[36] = {};
+    uint8_t *b = bssb + 4;      // hdr: bss_idx 0, pad[3]
+    put16(b + 0, 0);            // UNI_BSS_INFO_BASIC
+    put16(b + 2, 32);
+    b[4] = enable ? 1 : 0;      // active
+    b[7] = 0xff;                // band_idx
+    put32(b + 8, 0x10001);      // CONNECTION_INFRA_STA
+    b[12] = 1;                  // conn_state
+    put16(b + 20, 19);          // bmc_tx_wlan_idx (itlmt7925 value, WTBL reserved)
+    put16(b + 26, 19);          // sta_idx
+    setNum("MtkW4BssInfo", (uint32_t)uniCmd(UNI_BSS_INFO_UPDATE, bssb, sizeof(bssb), false, nullptr, 0, nullptr));
+    return rc;
+}
+
 // Everything after the firmware runs and before the first scan: NIC capability (MAC), EFUSE mode, MDP and band
 // init, the station interface, the US domain and power tables, RTS threshold and RX filter
 int MtkWlan::hwInit() {
@@ -456,27 +484,7 @@ int MtkWlan::hwInit() {
     setNum("MtkW4Rfcr", rr(rmacBase(0)));
 
     // 4. station interface (mt76_connac_mcu_uni_add_dev, NL80211_IFTYPE_STATION)
-    uint8_t dev[16] = {};
-    dev[0] = 0;                 // omac_idx
-    dev[1] = 0xff;              // band_idx (mt7925 uses 0xff)
-    put16(dev + 4, 0);          // DEV_INFO_ACTIVE
-    put16(dev + 6, 12);
-    dev[8] = 1;                 // active
-    dev[9] = 0;                 // link_idx
-    memcpy(dev + 10, mac, 6);
-    setNum("MtkW4DevInfo", (uint32_t)uniCmd(UNI_DEV_INFO_UPDATE, dev, sizeof(dev), false, nullptr, 0, nullptr));
-
-    uint8_t bssb[36] = {};
-    uint8_t *b = bssb + 4;      // hdr: bss_idx 0, pad[3]
-    put16(b + 0, 0);            // UNI_BSS_INFO_BASIC
-    put16(b + 2, 32);
-    b[4] = 1;                   // active
-    b[7] = 0xff;                // band_idx
-    put32(b + 8, 0x10001);      // CONNECTION_INFRA_STA
-    b[12] = 1;                  // conn_state
-    put16(b + 20, 19);          // bmc_tx_wlan_idx (itlmt7925 value, WTBL reserved)
-    put16(b + 26, 19);          // sta_idx
-    setNum("MtkW4BssInfo", (uint32_t)uniCmd(UNI_BSS_INFO_UPDATE, bssb, sizeof(bssb), false, nullptr, 0, nullptr));
+    setNum("MtkW4DevInfo", (uint32_t)devInfo(true));
 
     // 5. channel domain "US", DFS channels passive (mt7925_mcu_set_channel_domain)
     static uint8_t dom[16 + 8 * 40];

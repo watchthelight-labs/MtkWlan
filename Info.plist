@@ -15,11 +15,11 @@
 	<key>CFBundlePackageType</key>
 	<string>KEXT</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.10.0</string>
+	<string>0.11.0</string>
 	<key>CFBundleSignature</key>
 	<string>????</string>
 	<key>CFBundleVersion</key>
-	<string>0.10.0</string>
+	<string>0.11.0</string>
 	<key>IOKitPersonalities</key>
 	<dict>
 		<key>MT7925 PCIe</key>
@@ -55,6 +55,8 @@
 			<true/>
 		</dict>
 	</dict>
+	<key>OSBundleCompatibleVersion</key>
+	<string>0.10.0</string>
 	<key>OSBundleLibraries</key>
 	<dict>
 		<key>com.apple.iokit.IONetworkingFamily</key>
@@ -70,8 +72,6 @@
 		<key>com.apple.kpi.mach</key>
 		<string>14.0</string>
 	</dict>
-	<key>OSBundleCompatibleVersion</key>
-	<string>0.10.0</string>
 	<key>OSBundleRequired</key>
 	<string>Network-Root</string>
 </dict>
