@@ -376,7 +376,7 @@ int MtkWlan::bringUp() {
 
     // rings
     int e;
-    if ((e = ringAlloc(txData, false, TXQ_BAND0, 256, 2048)))  { setNum("MtkW2RingFail", 100 + e); step("W2 fail: ring alloc"); return -3; }
+    if ((e = ringAlloc(txData, false, TXQ_BAND0, 1024, 2048)))  { setNum("MtkW2RingFail", 100 + e); step("W2 fail: ring alloc"); return -3; }
     rawWrite(TX_RING0_EXT_CTRL, 0x4);
     if ((e = ringAlloc(txMcu, false, TXQ_MCU_WM, 32, 2048)))  { setNum("MtkW2RingFail", 200 + e); step("W2 fail: ring alloc"); return -3; }
     if ((e = ringAlloc(txFwdl, false, TXQ_FWDL, 32, 4096)))   { setNum("MtkW2RingFail", 300 + e); step("W2 fail: ring alloc"); return -3; }

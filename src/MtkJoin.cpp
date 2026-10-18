@@ -984,6 +984,17 @@ IOReturn MtkWlan::gatedUserCall(OSObject *owner, void *sel, void *in, void *out,
         self->coreStatus(static_cast<mtk_status *>(out));
         *osz = sizeof(mtk_status);
         return kIOReturnSuccess;
+    case kMtkUcTune: {
+        const uint32_t *kv = static_cast<const uint32_t *>(in);
+        if (!kv || kv[1] > 1000) return kIOReturnBadArgument;
+        if (kv[0] == MTK_TUNE_TX_INFLIGHT_BA) self->txCapBa = kv[1] ? (kv[1] < 8 ? 8 : kv[1]) : 128;
+        else if (kv[0] == MTK_TUNE_TX_INFLIGHT) self->txCapNoBa = kv[1] ? (kv[1] < 8 ? 8 : kv[1]) : 32;
+        else return kIOReturnBadArgument;
+        char s[64];
+        snprintf(s, sizeof(s), "ba %u noba %u", self->txCapBa, self->txCapNoBa);
+        self->setProperty("MtkW6TxInflightCaps", s);
+        return kIOReturnSuccess;
+    }
     default:
         return kIOReturnUnsupported;
     }

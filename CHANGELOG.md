@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.3 (2026-10-18)
+
+- Tx data ring 256 -> 1024 slots. The in-flight cap stays at 128 frames with a Tx block-ack session (32 without).
+- New user-client selector `kMtkUcTune` (5, administrator only) sets the in-flight cap live, so a value can be tested without a reboot. Keys in `MtkUserApi.h`; the current caps show in `MtkW6TxInflightCaps`.
+- A sweep on the author's laptop (VHT 80 MHz, 2 streams, -53 dBm) gave about 410 Mbit/s of UDP for every cap from 128 to 512 once the system had settled. The first few minutes after login are slower at any cap: macOS scans about 20 times then. 0.11.2, which raised the cap to 512, was never released.
+
 ## 0.11.1 (2026-10-18)
 
 - Front-end race fixed. With `mtkfe=native` the core used to start its Ethernet front end after a fixed 15 s and then refuse the native one for the whole boot, so on some boots the Wi-Fi menu was missing and the card showed up as an Ethernet port. The native front end spends 0 to 26 s inside Apple's `IO80211SkywalkInterface` start on 25G241 (five boots measured), so 15 s was a coin flip. A front end can now claim the core at probe (`MTK_CORE_FE_CLAIM` in `MtkCoreApi.h`); the core then waits up to 90 s, and a claimed front end that gives up declines at once. New properties `MtkFrontEndClaimMs` and `MtkFrontEndBoundMs` show the timing. Needs MtkWlanNative 0.4.10 for the claim; with an older front end nothing changes.

@@ -27,6 +27,7 @@ public:
     static IOReturn sJoin(OSObject *target, void *ref, IOExternalMethodArguments *args);
     static IOReturn sDisconnect(OSObject *target, void *ref, IOExternalMethodArguments *args);
     static IOReturn sStatus(OSObject *target, void *ref, IOExternalMethodArguments *args);
+    static IOReturn sTune(OSObject *target, void *ref, IOExternalMethodArguments *args);
 
 private:
     IOReturn call(uint32_t selector, const void *in, void *out, uint32_t *outSize);

@@ -20,8 +20,12 @@ enum {
     kMtkUcJoin = 2,          // structure in: mtk_join_params (admin)
     kMtkUcDisconnect = 3,    // no arguments (admin); also turns the open-network auto-join off until the next join
     kMtkUcStatus = 4,        // structure out: mtk_status
+    kMtkUcTune = 5,          // scalar in: key (MTK_TUNE_*), value; 0 = default (admin; 0.11.3)
     kMtkUcCount
 };
+
+// kMtkUcTune keys: data path limits that can be swept live instead of one value per boot
+enum { MTK_TUNE_TX_INFLIGHT_BA = 1, MTK_TUNE_TX_INFLIGHT = 2 };
 
 // security / akm / cipher bits in mtk_scan_result
 enum { MTK_SEC_OPEN = 0, MTK_SEC_WEP = 1, MTK_SEC_WPA1 = 2, MTK_SEC_RSN = 3 };

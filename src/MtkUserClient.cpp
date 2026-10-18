@@ -15,6 +15,7 @@ const IOExternalMethodDispatch kMethods[kMtkUcCount] = {
     {&MtkWlanUserClient::sJoin, 0, sizeof(mtk_join_params), 0, 0},                      // kMtkUcJoin
     {&MtkWlanUserClient::sDisconnect, 0, 0, 0, 0},                                      // kMtkUcDisconnect
     {&MtkWlanUserClient::sStatus, 0, 0, 0, sizeof(mtk_status)},                         // kMtkUcStatus
+    {&MtkWlanUserClient::sTune, 2, 0, 0, 0},                                            // kMtkUcTune
 };
 } // namespace
 
@@ -54,7 +55,7 @@ IOReturn MtkWlanUserClient::externalMethod(uint32_t selector, IOExternalMethodAr
 // Run one selector on the core's gate. Scan / join / disconnect change state and need an administrator.
 IOReturn MtkWlanUserClient::call(uint32_t selector, const void *in, void *out, uint32_t *outSize) {
     if (!core || !core->userClientAllowed()) return kIOReturnNotReady;
-    if ((selector == kMtkUcScan || selector == kMtkUcJoin || selector == kMtkUcDisconnect) && !admin) return kIOReturnNotPrivileged;
+    if ((selector == kMtkUcScan || selector == kMtkUcJoin || selector == kMtkUcDisconnect || selector == kMtkUcTune) && !admin) return kIOReturnNotPrivileged;
     IOWorkLoop *wl = core->getWorkLoop();
     if (!wl) return kIOReturnNotReady;
     return wl->runAction(&MtkWlan::gatedUserCall, core, (void *)(uintptr_t)selector, const_cast<void *>(in), out, outSize);
@@ -94,4 +95,11 @@ IOReturn MtkWlanUserClient::sStatus(OSObject *target, void *, IOExternalMethodAr
     IOReturn r = uc->call(kMtkUcStatus, nullptr, a->structureOutput, &sz);
     if (r == kIOReturnSuccess) a->structureOutputSize = sz;
     return r;
+}
+
+IOReturn MtkWlanUserClient::sTune(OSObject *target, void *, IOExternalMethodArguments *a) {
+    MtkWlanUserClient *uc = OSDynamicCast(MtkWlanUserClient, target);
+    if (!uc || !a || a->scalarInputCount != 2) return kIOReturnBadArgument;
+    uint32_t kv[2] = {(uint32_t)a->scalarInput[0], (uint32_t)a->scalarInput[1]};
+    return uc->call(kMtkUcTune, kv, nullptr, nullptr);
 }

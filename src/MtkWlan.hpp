@@ -375,8 +375,8 @@ private:
     uint8_t dataRate = 0;                      // MtkDataRate: 0 = firmware rate control (HT/VHT), 18-25 = fixed legacy rate
     uint32_t rxCtrl = 0;                       // DMA ctrl word of the last rxPoll
     uint32_t ticks = 0, lastTxTick = 0, rejoinAt = 0;
-    bool txBusy[256] = {};
-    uint32_t txBusyAt[256] = {};
+    bool txBusy[1024] = {};                    // 0.11.2: Tx data ring 1024 (was 256)
+    uint32_t txBusyAt[1024] = {};
     uint32_t txPackets = 0, txStall = 0, txDrop = 0, txRingFull = 0, txFreeEvents = 0, txFreed = 0,
              txFreeBadVer = 0, txLostFree = 0, txFailed = 0;
     uint32_t rxPackets = 0, rxBad = 0, rxPartial = 0, rxTrans = 0, rxNonSnap = 0, rxProtected = 0,
@@ -420,7 +420,8 @@ private:
     BaEvt baQ[8];
     uint8_t baQHead = 0, baQTail = 0;
     uint32_t baQDropped = 0;
-    uint32_t txInflightMax = 32;               // 32, or 128 while a TX block-ack session is up
+    uint32_t txInflightMax = 32;               // txCapNoBa, or txCapBa while a TX block-ack session is up
+    uint32_t txCapBa = 128, txCapNoBa = 32;    // 0.11.3: settable live (kMtkUcTune); 0.11.2's 512 / 64 was slower
     uint32_t txsDelaySum = 0, txsLastSeq = 0, txsSeqSpan = 0;
 };
 

@@ -428,7 +428,7 @@ void MtkWlan::tick() {
     baService();
     if (ticks % 10 == 0) rxBaTimeouts();
     if (ticks % 1000 == 0) bssAge();
-    txInflightMax = txBaState == 2 ? 128 : 32;
+    txInflightMax = txBaState == 2 ? txCapBa : txCapNoBa;
     if (linkUp && portOpen && htActive && txBaOn && txPackets > 200 && (txBaState == 0 || (txBaState == 1 && txBaRequests < 4)) &&
         (int32_t)(ticks - txBaNextTick) >= 0)
         txBaRequest();
