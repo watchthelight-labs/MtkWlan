@@ -1,10 +1,10 @@
-# MtkWlan
+# MtkWlan: MediaTek MT7925 Wi-Fi driver for macOS Hackintosh
 
 > **Heads up:** a good portion of this code is AI generated. I do understand how it works,
 > and I'm happy to explain any of it. If something looks wrong or you have a question,
 > open an issue or ping me on Discord (`watchthelight`).
 
-A macOS kext for the MediaTek MT7925 Wi-Fi card (PCI `14C3:7925`, MediaTek Filogic 360, the Wi-Fi 7 card in many 2025 laptops), written from scratch. It brings the card up, loads its firmware, scans, joins open and WPA2-PSK networks and shows up in macOS as an Ethernet interface (`en1`). macOS has no driver for this card and as far as I know there was no working one before this. Built for an OpenCore hackintosh (Lenovo Legion 5 15IAX10) on macOS Sequoia and Tahoe.
+A macOS kext for the MediaTek MT7925 Wi-Fi card (Hackintosh, OpenCore) (PCI `14C3:7925`, MediaTek Filogic 360, the Wi-Fi 7 card in many 2025 laptops), written from scratch. It brings the card up, loads its firmware, scans, joins open and WPA2-PSK networks and shows up in macOS as an Ethernet interface (`en1`). macOS has no driver for this card and as far as I know there was no working one before this. Built for an OpenCore hackintosh (Lenovo Legion 5 15IAX10) on macOS Sequoia and Tahoe.
 
 ## Status
 
@@ -24,7 +24,7 @@ Everything below was measured on one laptop (Legion 5 15IAX10, OpenCore 1.0.8) o
 
 ## What it can't do
 
-- **No Wi-Fi menu with this kext alone.** macOS sees an Ethernet card. Networks are chosen with the `mtkwifi` command line tool, there is no Wi-Fi icon, no Wi-Fi pane in System Settings, no AirDrop, no Continuity. The native front end that fixes this is a second kext, MtkWlanNative (github.com/watchthelight-labs/MtkWlanNative), built against the same core ops table; with it macOS drives scans and joins itself.
+- **No Wi-Fi menu with this kext alone.** macOS sees an Ethernet card. Networks are chosen with the `mtkwifi` command line tool, there is no Wi-Fi icon, no Wi-Fi pane in System Settings, no AirDrop, no Continuity. The native front end that fixes this is a second kext, MtkWlanNative (github.com/watchthelight-labs/mt7925-hackintosh-wifi-native), built against the same core ops table; with it macOS drives scans and joins itself.
 - **Not joinable:** WPA3-SAE only, WPA2 with PSK-SHA256 only, networks that require management frame protection, WPA (TKIP pairwise), enterprise (802.1X). `mtkwifi list` marks these.
 - No roaming between access points of one network. No HE (802.11ax) or EHT; the association is VHT at 80 MHz.
 - No sleep and wake handling. The laptop this runs on has sleep disabled.
@@ -100,7 +100,7 @@ register map, DMA ring layout and TX power tables. If you try the kext on a diff
    the IO80211 family, the Wi-Fi daemons' log, and the last three kernel panic reports if any. MAC addresses and SSIDs
    are replaced by placeholders (`--no-redact` keeps them; `--minutes N` widens the log window, default 30). Nothing in
    it is a key or passphrase.
-3. Open an issue at github.com/watchthelight-labs/MtkWlan/issues with the archive attached and three lines: the card
+3. Open an issue at github.com/watchthelight-labs/mt7925-hackintosh-wifi/issues with the archive attached and three lines: the card
    (PCI ids), the macOS build (`sw_vers`), and what happened (did the kext load, did `mtkwifi list` show networks, did a
    join get a lease). If the machine panicked, say what was on screen; the report includes the panic file.
 
