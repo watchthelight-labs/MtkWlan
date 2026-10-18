@@ -48,4 +48,4 @@ fi
 A=~/Desktop/$(basename "$OUT").tar.gz
 tar -czf "$A" -C "$(dirname "$OUT")" "$(basename "$OUT")" && rm -rf "$OUT"
 echo "report: $A"
-echo "open an issue at github.com/watchthelight-labs/MtkWlan (or MtkWlanNative) and attach it; say which card (PCI ids are in pci-mediatek.txt), which macOS build, and what you did"
+echo "open an issue at github.com/watchthelight-labs/mt7925-hackintosh-wifi (or mt7925-hackintosh-wifi-native) and attach it; say which card (PCI ids are in pci-mediatek.txt), which macOS build, and what you did"

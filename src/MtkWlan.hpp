@@ -368,7 +368,7 @@ private:
     mtk_fe_callbacks fe = {};                  // all null while no front end is registered
     // 0.10.0: front-end selection (MtkFrontEnd / boot-arg mtkfe). With "native" the core publishes itself and waits for
     // MtkWlanNative to register; if it declines or stays away, the Ethernet front end starts (frontEndService)
-    bool feNativeWanted = false, feDeclined = false, feFallbackDone = false;
+    bool feNativeWanted = false, feDeclined = false, feFallbackDone = false, feClaimed = false;   // feClaimed: MTK_CORE_FE_CLAIM seen
     uint32_t feWantedAt = 0, feMode = MTK_FE_ETHERNET, feModeFlags = 0;
     thread_call_t feFallbackCall = nullptr;
     bool ifEnabled = false, linkReported = false, rxQueued = false, txStalled = false;

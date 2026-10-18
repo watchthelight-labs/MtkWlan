@@ -116,6 +116,12 @@ struct mtk_core_ops_v2 {
 // A front end that could not start (the native kext declined its probe) tells the core so the Ethernet front end starts
 // at once instead of after the fallback timer: callPlatformFunction(MTK_CORE_FE_DECLINED, false, (void *)reason, ...).
 #define MTK_CORE_FE_DECLINED "mtk-core-fe-declined"
+// 0.11.1: a front end that passed its probe claims the core at once: callPlatformFunction(MTK_CORE_FE_CLAIM, false, ...).
+// The core then waits up to 90 s instead of 15 s before it starts the Ethernet front end, because the native interface
+// start can sit in Apple's IO80211SkywalkInterface start for 0 to 26 s on 25G241 (measured 2026-10-18), and a front end
+// that comes in after the fallback is refused for the whole boot. A claimed front end that gives up must still send
+// MTK_CORE_FE_DECLINED, so the fallback does not wait out the window. An older core ignores the claim.
+#define MTK_CORE_FE_CLAIM    "mtk-core-fe-claim"
 
 // MTK_FE_ETHERNET / MTK_FE_NATIVE are in MtkUserApi.h (mtk_status.front_end reports the same value).
 // set_mode flags: MTK_FE_KEEP_AUTOOPEN keeps the allow-listed open-network fallback while the native front end has no

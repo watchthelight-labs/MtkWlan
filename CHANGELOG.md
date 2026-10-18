@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.1 (2026-10-18)
+
+- Front-end race fixed. With `mtkfe=native` the core used to start its Ethernet front end after a fixed 15 s and then refuse the native one for the whole boot, so on some boots the Wi-Fi menu was missing and the card showed up as an Ethernet port. The native front end spends 0 to 26 s inside Apple's `IO80211SkywalkInterface` start on 25G241 (five boots measured), so 15 s was a coin flip. A front end can now claim the core at probe (`MTK_CORE_FE_CLAIM` in `MtkCoreApi.h`); the core then waits up to 90 s, and a claimed front end that gives up declines at once. New properties `MtkFrontEndClaimMs` and `MtkFrontEndBoundMs` show the timing. Needs MtkWlanNative 0.4.10 for the claim; with an older front end nothing changes.
+- Matches PCI `14C3:0717` as well, the AMD RZ717 flavour of the MT7925 on AM5 desktop boards (same firmware in Linux). Untested on that card so far.
+- Tested on the author's laptop with MtkWlanNative 0.4.10 and a forced 25 s front-end delay: the native front end bound after 24.2 s, no fallback.
+
 ## 0.11.0 (2026-10-18)
 
 - Core ops table v4 (`MtkCoreApi.h`): `set_mac` changes the station address after bring-up. The association ends first, the firmware station interface is removed and added again with the new address, and the manager rejoins the wanted network. macOS gives a Wi-Fi interface a private address per network; without this the station associated with the old address in the firmware and DHCP never saw a reply.

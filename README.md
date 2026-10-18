@@ -88,7 +88,8 @@ Set in `Info.plist` under the `MtkWlan` personality (edit the copy inside the ke
 
 ## Other MediaTek cards: collecting logs and reporting back
 
-This driver has been run on one card (MT7925, PCI `14c3:7925`, subsystem `17aa:e0ff`, in one laptop). Other MediaTek
+This driver has been run on one card (MT7925, PCI `14c3:7925`, subsystem `17aa:e0ff`, in one laptop). From 0.11.1 it also
+matches `14c3:0717`, the AMD RZ717 card on AM5 desktop boards; a first test is under way. Other MediaTek
 Wi-Fi 6E/7 cards (MT7921, MT7922, other MT7925 boards) share the MCU command set the firmware loader and the scan/join
 code use, but each needs its own firmware files (`firmware/`, see `gen_firmware.py`) and may differ in the PCIe
 register map, DMA ring layout and TX power tables. If you try the kext on a different card, I want the result either way.

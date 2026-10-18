@@ -545,17 +545,19 @@ int MtkWlan::netStage() {
     return 0;
 }
 
-constexpr uint32_t FE_FALLBACK_TICKS = 15000;   // 15 s at the 1 ms tick
+constexpr uint32_t FE_FALLBACK_TICKS = 15000;   // 15 s at the 1 ms tick: nothing has claimed the core
+constexpr uint32_t FE_CLAIM_TICKS = 90000;      // 90 s once MtkWlanNative claimed it (its interface start took up to 26 s)
 
 // Tick: while the native front end is wanted and nothing has registered, start the Ethernet one after a decline or
 // FE_FALLBACK_TICKS. The start itself runs on its own thread (IONetworkController::start and the interface attach belong
 // off the gate, as in the normal path), never from the tick.
 void MtkWlan::frontEndService() {
     if (!feNativeWanted || feFallbackDone || fe.rx || !feFallbackCall) return;
-    if (!feDeclined && ticks - feWantedAt < FE_FALLBACK_TICKS) return;
+    if (!feDeclined && ticks - feWantedAt < (feClaimed ? FE_CLAIM_TICKS : FE_FALLBACK_TICKS)) return;
     feFallbackDone = true;
     setProperty("MtkFrontEndFallback", feDeclined ? "native front end declined, Ethernet front end started"
-                                                  : "native front end did not register in time, Ethernet front end started");
+                                       : feClaimed ? "native front end claimed the core but did not register in 90 s, Ethernet front end started"
+                                                   : "native front end did not register in time, Ethernet front end started");
     thread_call_enter(feFallbackCall);
 }
 
@@ -641,6 +643,13 @@ IOReturn MtkWlan::callPlatformFunction(const OSSymbol *functionName, bool waitFo
         feDeclined = true;                      // the tick's frontEndService starts the Ethernet front end
         return kIOReturnSuccess;
     }
+    if (functionName && functionName->isEqualTo(MTK_CORE_FE_CLAIM)) {
+        // usually before netStage: MtkWlanNative probes as soon as start() publishes the core
+        feClaimed = true;
+        if (feFallbackCall) setNum("MtkFrontEndClaimMs", ticks - feWantedAt);
+        else setProperty("MtkFrontEndClaimMs", "before the wait began");
+        return kIOReturnSuccess;
+    }
     return IOService::callPlatformFunction(functionName, waitForFunction, param1, param2, param3, param4);
 }
 
@@ -664,6 +673,9 @@ IOReturn MtkWlan::gatedSetCallbacks(OSObject *owner, void *arg, void *, void *, 
     if (cb) {
         if (self->fe.rx) return kIOReturnBusy;  // one front end at a time
         memcpy(&self->fe, cb, sizeof(self->fe));
+        // how long the native front end took from the wait start: the margin the fallback window has to cover
+        if (self->feNativeWanted && self->feFallbackCall && cb->version >= MTK_CORE_API_V3)
+            self->setNum("MtkFrontEndBoundMs", self->ticks - self->feWantedAt);
         if (cb->version >= MTK_CORE_API_V2) {
             const mtk_fe_callbacks_v2 *v2 = reinterpret_cast<const mtk_fe_callbacks_v2 *>(cb);
             self->feScanDone = v2->scan_done;
