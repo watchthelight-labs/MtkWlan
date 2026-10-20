@@ -1,0 +1,21 @@
+<!-- Kernel > Add entries for the MT7925 Wi-Fi set; MtkWlan must come before MtkWlanNative -->
+<dict>
+	<key>Arch</key><string>x86_64</string>
+	<key>BundlePath</key><string>MtkWlan.kext</string>
+	<key>Comment</key><string>MediaTek MT7925 Wi-Fi driver (mt7925-hackintosh-wifi)</string>
+	<key>Enabled</key><true/>
+	<key>ExecutablePath</key><string>Contents/MacOS/MtkWlan</string>
+	<key>MaxKernel</key><string></string>
+	<key>MinKernel</key><string></string>
+	<key>PlistPath</key><string>Contents/Info.plist</string>
+</dict>
+<dict>
+	<key>Arch</key><string>x86_64</string>
+	<key>BundlePath</key><string>MtkWlanNative.kext</string>
+	<key>Comment</key><string>MT7925 native Wi-Fi menu (mt7925-hackintosh-wifi-native), needs boot-args mtkfe=native mtknativeif=1</string>
+	<key>Enabled</key><true/>
+	<key>ExecutablePath</key><string>Contents/MacOS/MtkWlanNative</string>
+	<key>MaxKernel</key><string></string>
+	<key>MinKernel</key><string></string>
+	<key>PlistPath</key><string>Contents/Info.plist</string>
+</dict>
