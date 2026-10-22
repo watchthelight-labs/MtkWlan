@@ -1,9 +1,5 @@
 # MtkWlan: MediaTek MT7925 Wi-Fi driver for macOS Hackintosh
 
-> **Heads up:** a good portion of this code is AI generated. I do understand how it works,
-> and I'm happy to explain any of it. If something looks wrong or you have a question,
-> open an issue or ping me on Discord (`watchthelight`).
-
 Wi-Fi for the MediaTek MT7925 (Filogic 360, Wi-Fi 7, PCI `14C3:7925`, also the AMD RZ717 `14C3:0717`) on a
 Hackintosh: a macOS kext written from scratch for OpenCore on macOS Sequoia 15 and Tahoe 26. It brings the card up,
 loads its firmware, scans, joins open and WPA2-PSK networks and moves traffic at 190 Mb/s down, 175 Mb/s up on a
