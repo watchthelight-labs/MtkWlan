@@ -83,4 +83,4 @@ MtkWlan was developed inside a private notebook repository for a Lenovo Legion 5
 one test boot per version and the OpenCore logs and registry dumps of each boot kept there. The
 repository audit of itlmt7925 (cross-checks against Linux) was done before any of it was used.
 
-A good portion of the code was written with Claude Code (Anthropic); see the note at the top of the README.
+A good portion of the code was written with Claude Code (Anthropic).

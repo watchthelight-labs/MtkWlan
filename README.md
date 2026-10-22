@@ -5,15 +5,15 @@ Hackintosh: a macOS kext written from scratch for OpenCore on macOS Sequoia 15 a
 loads its firmware, scans, joins open and WPA2-PSK networks and moves traffic at 190 Mb/s down, 175 Mb/s up on a
 5 GHz network. macOS has no driver for this card and, as far as I know, no other project drives the MT7925.
 
-**With the second kext, [mt7925-hackintosh-wifi-native](https://github.com/watchthelight-labs/mt7925-hackintosh-wifi-native),
-the card is a real Wi-Fi card to macOS**: the Wi-Fi icon in the menu bar, the Wi-Fi pane in System Settings, saved
-networks, auto-join at boot, a private address per network. No menu-bar client app, no command line. That is the
-difference from SimpleMtkWlan and its forks, which show the card as Ethernet and join networks through a client app or
-a tool (comparison below).
+With the second kext, [mt7925-hackintosh-wifi-native](https://github.com/watchthelight-labs/mt7925-hackintosh-wifi-native),
+macOS treats the card as a real Wi-Fi card: the Wi-Fi icon in the menu bar, the Wi-Fi pane in System Settings, saved
+networks, auto-join at boot and a private address per network, without a menu-bar client app or the command line.
+SimpleMtkWlan and its forks show the card as Ethernet and join networks through a client app or a tool (comparison
+below).
 
 ## The MT7925 set
 
-Three kexts, one card. Install the first two together for Wi-Fi, the third for Bluetooth.
+There are three kexts for the one card: install the first two together for Wi-Fi and the third for Bluetooth.
 
 | Repo | What it does | Needs |
 |---|---|---|
@@ -36,7 +36,7 @@ The quickest install is the bundle on the [releases page](../../releases): both 
 
 ## Compared with SimpleMtkWlan and AirportMtkWlan
 
-Both projects are good work and they cover cards this one does not. The honest picture, from their READMEs on
+Both projects are good work and they cover cards this one does not. The table is from their READMEs as of
 2026-10-20:
 
 | | mt7925-hackintosh-wifi + -native | SimpleMtkWlan (pengubow and forks) | AirportMtkWlan (pengubow, mnnobre) |
@@ -49,8 +49,8 @@ Both projects are good work and they cover cards this one does not. The honest p
 | WPA2-PSK | code passes the host tests; **not yet joined on air** (only an open network here) | yes | yes |
 | Licence | ISC (plus Clear BSD parts) | GPLv2 | GPLv2 |
 
-So: on an MT7925 this is the driver, and with the native front end it behaves like Apple's own Wi-Fi. On an MT7921 or
-MT7922 use SimpleMtkWlan today and watch the issue linked below.
+On an MT7925 use this driver; with the native front end it behaves like Apple's own Wi-Fi. On an MT7921 or MT7922 use
+SimpleMtkWlan for now and watch the issue linked below.
 
 ## Status
 
@@ -70,8 +70,8 @@ Everything below was measured on one laptop (Legion 5 15IAX10, OpenCore 1.0.8) o
 
 ## What it can't do
 
-- **No Wi-Fi menu with this kext alone.** macOS sees an Ethernet card. Networks are chosen with the `mtkwifi` command line tool, there is no Wi-Fi icon, no Wi-Fi pane in System Settings, no AirDrop, no Continuity. The native front end is a second kext, [MtkWlanNative](https://github.com/watchthelight-labs/mt7925-hackintosh-wifi-native) (0.4.9, macOS Tahoe 26.7.1 only), built against the same core ops table: with it the Wi-Fi menu works, macOS runs the scans and joins, saves networks and auto-joins at boot.
-- **Not joinable:** WPA3-SAE only, WPA2 with PSK-SHA256 only, networks that require management frame protection, WPA (TKIP pairwise), enterprise (802.1X). `mtkwifi list` marks these.
+- With this kext alone there is no Wi-Fi menu: macOS sees an Ethernet card and you pick networks with the `mtkwifi` command line tool. There is no Wi-Fi icon, no Wi-Fi pane in System Settings, no AirDrop, no Continuity. The native front end is a second kext, [MtkWlanNative](https://github.com/watchthelight-labs/mt7925-hackintosh-wifi-native) (0.4.9, macOS Tahoe 26.7.1 only), built against the same core ops table: with it the Wi-Fi menu works, macOS runs the scans and joins, saves networks and auto-joins at boot.
+- It can't join WPA3-SAE only, WPA2 with PSK-SHA256 only, networks that require management frame protection, WPA (TKIP pairwise) or enterprise (802.1X) networks. `mtkwifi list` marks these.
 - No roaming between access points of one network. No HE (802.11ax) or EHT; the association is VHT at 80 MHz.
 - No sleep and wake handling. The laptop this runs on has sleep disabled.
 - Three firmware command timeouts in a row stop the driver until a reboot.
@@ -81,8 +81,8 @@ Everything below was measured on one laptop (Legion 5 15IAX10, OpenCore 1.0.8) o
 
 ## Installation
 
-The short way: the bundle zip from the [releases](../../releases) holds `MtkWlan.kext`, `MtkWlanNative.kext`, the
-licences and `INSTALL.md` with these steps. The long way, from the parts:
+The bundle zip from the [releases](../../releases) holds `MtkWlan.kext`, `MtkWlanNative.kext`, the licences and
+`INSTALL.md` with these steps. To install from the parts instead:
 
 1. Get `MtkWlan.kext` from the [releases](../../releases) (the release zip carries `LICENSE`, `NOTICE.md` and
    `LICENSES/` because the licences require them next to the binary), or build it (below). For the Wi-Fi menu also get
