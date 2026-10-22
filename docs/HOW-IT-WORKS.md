@@ -28,6 +28,17 @@ Everything runs from `MtkWlan::start` on the provider's start thread, then hands
 
 From here on the timer runs: every millisecond it drains the RX rings, dispatches MCU events, and services the scan, join, security, connection manager and block-ack machines in turn.
 
+Steps 2 and 3 live in `hwStart` so they can run again (0.12.0). If they fail at attach, usually because a warm restart left the old firmware running with its DMA pointed at freed memory, `bringUp` does one more WFSYS reset and a second try, then a PCIe function level reset (`pciFlr`, only if the card advertises FLR) and a third. On restart and power off the core is in the power plane and `systemWillShutdown` quiesces the chip on the work-loop gate: interrupts off, driver own, DMA off, WFSYS reset, bus master off, as `mt7925_pci_shutdown` does. `MtkAttachRecover`, `MtkFlr` and `MtkPmJoined` show what happened.
+
+## The link supervisor
+
+`stallService` runs once a second and feeds counters to `MtkSuper.c`, a small state machine with no kernel calls (host-tested in `tests/mtk_super_test.c`). While the port is open:
+
+- No frame received for `MtkStallSec` seconds (default 8): send one null frame with Tx status. Acknowledged means a quiet link and nothing happens. Not acknowledged means the AP dropped us without a deauth, and the link goes down the same way as after a deauth, so the manager rejoins. No status at all means the chip is stuck.
+- Frames queued and no Tx token released for `MtkStallSec` seconds, or `fwDead` set: the chip is stuck.
+
+A stuck chip gets `reload`: the link goes down (a native front end sees a link loss), WFSYS reset, the rings reset in place, the firmware loaded again, `hwInit` with the current station address kept, then a scan and a rejoin of the wanted network. The front end and its interface stay attached. At most three reloads per ten minutes. `MtkStall` has the counters and `MtkStallPostMortem` the ring indexes and PCI state from just before the last reload. `MtkStallSec = 0` or boot-arg `mtkstall=0` turns it off, and `kMtkUcTune` key 4 freezes the data ring on purpose to test the path. The idea of a supervisor that resets and reloads comes from thanhnndev's ga403wm-hackintosh [5f00557](https://github.com/thanhnndev/ga403wm-hackintosh/commit/5f00557b5ed4377b6cb0f45a4e1c9cab5503163f).
+
 ## Scanning
 
 `scanStart` sends a hardware scan (UNI SCAN, all channels including DFS on 5 GHz, with the SSIDs of saved networks as directed probes). The firmware returns beacons and probe responses as frames on the MCU ring; `rxFrame` classifies them, `mtkParseFrame` pulls out SSID, channel, capability, RSN or WPA element and the HT/VHT elements. Each network goes into a cache of 48 entries keyed by BSSID with its security type (`mtk_rsn_parse` in `MtkSupp.c` decides whether the driver can join it: AKM PSK with pairwise CCMP, group CCMP or TKIP), RSSI from the RCPI in the RX descriptor, and a last-seen time. Entries unseen for 60 s are dropped. Beacons heard while associated keep the cache fresh. Scans start only while idle or connected, never during an authentication, and no join starts while a scan runs.
@@ -59,6 +70,8 @@ The PMK is derived in user space by `mtkwifi add`, stored root-only, and handed 
 ## The connection manager
 
 `cmService` decides what to join. A wanted network (from `mtkwifi join` or a front end's `join`) is kept: rejoined 500 ms after a loss, retried with backoff (5, 10, 20, 40, 60 s) after failures, rescanned every 5 s while out of range (15 s after the first 30 s). When nothing is wanted or the wanted network has been out of range for 30 s, the driver may join an open network whose name is listed exactly in `MtkAutoOpenSsids`, but not before 20 s after the first scan (so the autojoin daemon gets its turn first) and not while a user-space scan is pending. While on that fallback it keeps looking for the wanted network after every scan (one every 30 s) and switches back when it reappears. `mtkwifi disconnect` turns the fallback off until the next `join`.
+
+`MtkAutoNetworks` (0.12.0) does the same for WPA2 networks on machines without the native menu: entries of `Ssid` plus `Pmk` (64 hex digits from `mtkwifi pmk`). When one is in range and nothing is wanted, it becomes the wanted network as if it had been joined through the user client. The keys are removed from the registry after start. Neither list is used while the native front end drives the joins.
 
 ## The data path
 
@@ -102,10 +115,9 @@ Callbacks must not sleep and must not call back into `tx` or `set_enabled`. The 
 - HE (802.11ax) and EHT; the association is VHT at 80 MHz.
 - A native front end that gives macOS a real Wi-Fi interface (menu, AirDrop, Continuity). The ops table is shaped for it, and that kext is now [mt7925-hackintosh-wifi-native](https://github.com/watchthelight-labs/mt7925-hackintosh-wifi-native).
 - Sleep and wake. The laptop this runs on has sleep disabled.
-- Recovery after `fwDead`: three firmware command timeouts in a row stop the machines until a reboot.
 - Matching a SCAN_DONE or ROC grant event to the request that caused it; the machines use deadlines instead.
 - Interrupt-driven RX.
 
 ## Testing
 
-`bash tests/run.sh` builds `MtkCrypto.c` and `MtkSupp.c` with the host clang and UBSan, runs the vectors and the simulated handshakes, and compares the printed values with `tests/oracle.py`. On the machine, `tools/wifi.sh` records the interface state, runs a router ping, a download and an upload through Cloudflare's speed endpoint with ping alongside, and saves every `Mtk*` property. The numbers in the README come from that script.
+`bash tests/run.sh` builds `MtkCrypto.c`, `MtkSupp.c` and `MtkSuper.c` with the host clang and UBSan, runs the vectors, the simulated handshakes and every supervisor decision, and compares the printed values with `tests/oracle.py`. On the machine, `tools/wifi.sh` records the interface state, runs a router ping, a download and an upload through Cloudflare's speed endpoint with ping alongside, and saves every `Mtk*` property. The numbers in the README come from that script.
