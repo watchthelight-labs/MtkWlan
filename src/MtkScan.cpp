@@ -189,6 +189,7 @@ void MtkWlan::dispatchRx(const uint8_t *p, uint32_t len) {
 
 // Drain the band0 data ring (scan results arrive there as beacons / probe responses)
 void MtkWlan::pollRx() {
+    if (stallFreezeRx) return;                  // supervisor test: the data ring goes unread until the reload
     for (int guard = 0; guard < 256; guard++) {
         uint32_t len = 0;
         const uint8_t *p = rxPoll(rxData, &len);
@@ -437,7 +438,7 @@ int MtkWlan::devInfo(bool enable) {
 
 // Everything after the firmware runs and before the first scan: NIC capability (MAC), EFUSE mode, MDP and band
 // init, the station interface, the US domain and power tables, RTS threshold and RX filter
-int MtkWlan::hwInit() {
+int MtkWlan::hwInit(bool keepMac) {
     static uint8_t ev[512];
     uint32_t evl = 0;
 
@@ -462,12 +463,14 @@ int MtkWlan::hwInit() {
         for (uint16_t i = 0; i < n && q + 4 <= end; i++) {
             uint16_t tag = le16(q), tl = le16(q + 2);
             if (tl < 4 || q + tl > end) break;
-            if (tag == 7 && tl >= 10) { memcpy(mac, q + 4, 6); gotMac = true; }   // MT_NIC_CAP_MAC_ADDR
+            if (tag == 7 && tl >= 10 && !keepMac) { memcpy(mac, q + 4, 6); gotMac = true; }   // MT_NIC_CAP_MAC_ADDR
             q += tl;
         }
         setNum("MtkW4NicCapElements", n);
     }
-    if (gotMac) {
+    if (keepMac) {
+        // a reload keeps the address macOS may have set (I-058): the firmware gets it again in DEV_INFO below
+    } else if (gotMac) {
         char s[18];
         snprintf(s, sizeof(s), "%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
         setProperty("MtkMacAddr", s);

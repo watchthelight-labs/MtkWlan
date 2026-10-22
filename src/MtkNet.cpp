@@ -28,6 +28,7 @@
 
 #include "MtkWlan.hpp"
 #include "MtkCrypto.h"
+#include <kern/clock.h>
 
 namespace {
 constexpr uint16_t AP_WCID = 1;                  // same as MtkJoin.cpp
@@ -110,6 +111,7 @@ void MtkWlan::txQueue(uint32_t flen, uint8_t qIdx, uint8_t ftype, uint8_t stype,
     txBusy[slot] = true;
     txBusyAt[slot] = ticks;
     txInFlight++;
+    txQueued++;
     if (txInFlight > txInFlightPeak) txInFlightPeak = txInFlight;
     txData.head = (uint16_t)((slot + 1) % txData.n);
     rawWrite(txData.regs + 8, txData.head);
@@ -356,7 +358,7 @@ void MtkWlan::reportLink() {
     fe.link(fe.ctx, up, up ? LINK_SPEED : 0);
 }
 
-void MtkWlan::keepalive() {
+void MtkWlan::keepalive(bool status) {
     if (!txSlotReady(false)) return;
     uint8_t *f = txData.bufs.va + txData.head * txData.bufSize + 128;
     bzero(f, 24);
@@ -365,8 +367,96 @@ void MtkWlan::keepalive() {
     memcpy(f + 4, tgtBssid, 6);
     memcpy(f + 10, mac, 6);
     memcpy(f + 16, tgtBssid, 6);
-    txQueue(24, LMAC_AC_BE, 2, 4, RATE_IDX_OFDM12, false, false);
+    txQueue(24, LMAC_AC_BE, 2, 4, RATE_IDX_OFDM12, false, status);
     keepalives++;
+}
+
+// Link supervisor (I-096), once a second: MtkSuper.c decides from the counters, this does what it says
+void MtkWlan::stallService() {
+    if (!super.stall_ms || ticks % 1000) return;
+    mtk_super_in in = {};
+    in.now_ms = ticks;
+    in.link = linkUp && portOpen;
+    in.fw_dead = fwDead;
+    in.rx_frames = rxFrames;
+    in.tx_queued = txQueued;
+    in.tx_freed = txFreed;
+    in.txs_records = txsRecords;
+    in.txs_ack_err = txsAckErr;
+    switch (mtk_super_step(&super, &in)) {
+    case MTK_SUPER_PROBE:
+        keepalive(true);
+        break;
+    case MTK_SUPER_REJOIN:
+        // the AP stopped acknowledging us without a deauth: the same path as a deauth, the manager rejoins
+        step("stall: the AP no longer acknowledges frames, rejoining");
+        deauthPendingReason = 0;
+        deauthPending = true;
+        break;
+    case MTK_SUPER_RELOAD:
+        reload(fwDead ? "firmware unresponsive" : stallFreezeRx ? "test (frozen rx)" : "tx tokens or tx status stopped");
+        break;
+    default:
+        break;
+    }
+    if (super.probes || super.reloads || super.capped) {
+        char s[160];
+        snprintf(s, sizeof(s), "probes %u idle-ok %u rejoins %u reloads %u failed %u capped %u last-reload-ms %u", super.probes,
+                 super.idle_ok, super.rejoins, super.reloads, stallReloadFails, super.capped, stallLastReloadMs);
+        setProperty("MtkStall", s);
+    }
+}
+
+// Chip reset, firmware reload and rejoin without detaching anything: the front end and its interface stay, the link
+// goes down and the connection manager rejoins the wanted network (native: macOS sees a link loss and its join result).
+// Runs on the gate from the tick; blocks it for the firmware download (about a second).
+int MtkWlan::reload(const char *why) {
+    uint64_t t0, t1;
+    clock_get_uptime(&t0);
+    char pm[200];
+    snprintf(pm, sizeof(pm), "%s | tx cpu %u dma %u | rx cpu %u dma %u | mcu rx cpu %u dma %u | seq %u | pci cmd %04x | irq %08x",
+             why, rawRead(txData.regs + 8), rawRead(txData.regs + 12), rawRead(rxData.regs + 8), rawRead(rxData.regs + 12),
+             rawRead(rxMcu.regs + 8), rawRead(rxMcu.regs + 12), mcuSeq & 0xf, pci->configRead16(kIOPCIConfigCommand),
+             irqStatusOr);
+    setProperty("MtkStallPostMortem", pm);
+    IOLog("MtkWlan: reload: %s\n", pm);
+    fwDead = true;                              // the teardown below must not wait 3 s per firmware command
+    bool scanWasRunning = scanRunning;
+    joinTeardown(0);
+    scanRunning = false;
+    if (scanWasRunning && feScanDone && fe.ctx) feScanDone(fe.ctx, -1, 0);
+    for (uint16_t i = 0; i < txData.n; i++) txBusy[i] = false;
+    txInFlight = 0;
+    stallFreezeRx = false;
+    fwOwn();
+    int rc = drvOwn() > 0 ? hwStart() : -4;
+    if (rc && rc != -3 && pciFlr()) {
+        fwOwn();
+        if (drvOwn() > 0) rc = hwStart();
+    }
+    if (rc) {
+        stallReloadFails++;
+        step("stall: reload failed, the firmware stays stopped");
+        return rc;
+    }
+    fwDead = false;
+    uniCmdTimeouts = 0;
+    if (hwInit(true)) {
+        stallReloadFails++;
+        return -8;
+    }
+    scanWanted = true;
+    cmKick = true;
+    rejoinPending = true;
+    lastResult = MTK_JOIN_AP_LEFT;
+    cmFails = 0;
+    rejoinAt = ticks + REJOIN_DELAY_TICKS;
+    clock_get_uptime(&t1);
+    uint64_t ns;
+    absolutetime_to_nanoseconds(t1 - t0, &ns);
+    stallLastReloadMs = (uint32_t)(ns / 1000000);
+    step("stall: chip reset and firmware reloaded, rejoining");
+    return 0;
 }
 
 void MtkWlan::timerFired(OSObject *owner, IOTimerEventSource *) {
@@ -423,6 +513,7 @@ void MtkWlan::tick() {
     scanService();
     cmService();
     frontEndService();
+    stallService();
     if (linkUp && portOpen && ticks - lastTxTick > 10000) keepalive();
     if (ticks % 100 == 0) txSweep();
     baService();
@@ -708,7 +799,7 @@ int MtkWlan::opSetMode(void *core, uint32_t mode, uint32_t flags) {
     self->feMode = mode;
     self->feModeFlags = flags;
     if (mode == MTK_FE_NATIVE && !(flags & MTK_FE_KEEP_AUTOOPEN)) self->autoOpen = false;   // macOS drives the joins
-    else if (!self->wantActive) self->autoOpen = self->nAutoOpenSsids > 0;
+    else if (!self->wantActive) self->autoOpen = self->autoAllowed();
     self->setProperty("MtkFrontEndActive", mode == MTK_FE_NATIVE ? (flags & MTK_FE_KEEP_AUTOOPEN ? "native (auto-open kept)" : "native")
                                                             : "ethernet");
     return 0;

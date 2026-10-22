@@ -92,22 +92,26 @@ int MtkWlan::ringAlloc(MtkRing &r, bool rx, uint16_t idx, uint16_t n, uint32_t b
     if (e) return 10 + e;
     e = r.bufs.alloc(n * bufSize, mapper);
     if (e) return 20 + e;
-    // mt76_dma_queue_reset: every descriptor DMA_DONE (free), indexes to 0, base and size
-    for (uint16_t i = 0; i < n; i++)
+    ringReset(r);
+    return 0;
+}
+
+// mt76_dma_queue_reset: every descriptor DMA_DONE (free), indexes to 0, base and size; also after a chip reset
+void MtkWlan::ringReset(MtkRing &r) {
+    for (uint16_t i = 0; i < r.n; i++)
         desc(r, i)[1] = DMA_CTL_DMA_DONE;
     r.desc.toDevice();
     rawWrite(r.regs + 8, 0);            // cpu_idx
     rawWrite(r.regs + 12, 0);           // dma_idx
     rawWrite(r.regs + 0, r.desc.iova);  // desc_base
-    rawWrite(r.regs + 4, n);            // ring_size
+    rawWrite(r.regs + 4, r.n);          // ring_size
     r.head = r.tail = (uint16_t)rawRead(r.regs + 12);
-    if (rx) {
+    if (r.rx) {
         // mt76_dma_rx_fill: hand ndesc - 1 buffers to the device
-        for (uint16_t k = 0; k + 1 < n; k++)
+        for (uint16_t k = 0; k + 1 < r.n; k++)
             rxArm(r);
         rawWrite(r.regs + 8, r.head);
     }
-    return 0;
 }
 
 void MtkWlan::rxArm(MtkRing &r) {
@@ -346,7 +350,9 @@ int MtkWlan::loadRam() {
 
 // ---------------------------------------------------------------- W2 + W3 sequence
 
-int MtkWlan::bringUp() {
+// W2 + W3 on a chip we own: WFSYS reset, WFDMA rings (allocated once, reset on later calls), firmware, N9 ready.
+// Runs at attach and again from the attach recovery and the link supervisor (reload).
+int MtkWlan::hwStart() {
     // rest of mt7925_pci_probe after drv_own
     rmw(HW_EMI_CTL, 1u << 1, 1u << 1);                         // SLPPROT_EN
 
@@ -360,7 +366,7 @@ int MtkWlan::bringUp() {
 
     rawWrite(WFDMA0_HOST_INT_ENA, 0);
     rawWrite(PCIE_MAC_INT_ENABLE, 0xff);
-    setupInterrupt();
+    if (irqIndex < 0) setupInterrupt();
 
     // mt7925_dma_init -> mt792x_dma_disable(force)
     rawWrite(WFDMA0_GLO_CFG, rawRead(WFDMA0_GLO_CFG) & ~(GLO_TX_DMA_EN | GLO_RX_DMA_EN |
@@ -376,12 +382,16 @@ int MtkWlan::bringUp() {
 
     // rings
     int e;
-    if ((e = ringAlloc(txData, false, TXQ_BAND0, 1024, 2048)))  { setNum("MtkW2RingFail", 100 + e); step("W2 fail: ring alloc"); return -3; }
+    auto ring = [&](MtkRing &r, bool rx, uint16_t idx, uint16_t n, uint32_t size) {
+        if (r.desc.va) { ringReset(r); return 0; }
+        return ringAlloc(r, rx, idx, n, size);
+    };
+    if ((e = ring(txData, false, TXQ_BAND0, 1024, 2048)))  { setNum("MtkW2RingFail", 100 + e); step("W2 fail: ring alloc"); return -3; }
     rawWrite(TX_RING0_EXT_CTRL, 0x4);
-    if ((e = ringAlloc(txMcu, false, TXQ_MCU_WM, 32, 2048)))  { setNum("MtkW2RingFail", 200 + e); step("W2 fail: ring alloc"); return -3; }
-    if ((e = ringAlloc(txFwdl, false, TXQ_FWDL, 32, 4096)))   { setNum("MtkW2RingFail", 300 + e); step("W2 fail: ring alloc"); return -3; }
-    if ((e = ringAlloc(rxMcu, true, RXQ_MCU_WM, 128, 2048)))   { setNum("MtkW2RingFail", 400 + e); step("W2 fail: ring alloc"); return -3; }
-    if ((e = ringAlloc(rxData, true, RXQ_BAND0, 512, 2048)))   { setNum("MtkW2RingFail", 500 + e); step("W2 fail: ring alloc"); return -3; }
+    if ((e = ring(txMcu, false, TXQ_MCU_WM, 32, 2048)))  { setNum("MtkW2RingFail", 200 + e); step("W2 fail: ring alloc"); return -3; }
+    if ((e = ring(txFwdl, false, TXQ_FWDL, 32, 4096)))   { setNum("MtkW2RingFail", 300 + e); step("W2 fail: ring alloc"); return -3; }
+    if ((e = ring(rxMcu, true, RXQ_MCU_WM, 128, 2048)))   { setNum("MtkW2RingFail", 400 + e); step("W2 fail: ring alloc"); return -3; }
+    if ((e = ring(rxData, true, RXQ_BAND0, 512, 2048)))   { setNum("MtkW2RingFail", 500 + e); step("W2 fail: ring alloc"); return -3; }
     setNum("MtkW2RxMcuIova", rxMcu.desc.iova);
     setNum("MtkW2RxMcuPhys", rxMcu.desc.phys, 64);   // equal to the iova: no VT-d translation
 
@@ -439,6 +449,28 @@ int MtkWlan::bringUp() {
     setNum("MtkRxUnmatched", rxUnmatched);
     if (!ready) { step("W3 fail: N9 not ready after FW_START"); return -7; }
     step("W3 pass: firmware running (N9 ready)");
+    return 0;
+}
+
+int MtkWlan::bringUp() {
+    int rc = hwStart();
+    // I-081: a warm restart can leave the chip running the old firmware with its DMA pointing at freed memory, and the
+    // patch download then fails. One more WFSYS reset and a second try, then a function level reset and a third.
+    if (rc && rc != -3) {
+        attachRecover++;
+        setNum("MtkAttachRecover", attachRecover);
+        setNum("MtkAttachFirstResult", (uint32_t)rc);
+        IOLog("MtkWlan: attach failed (%d), WFSYS reset and retry\n", rc);
+        fwOwn();
+        drvOwn();
+        rc = hwStart();
+        if (rc && rc != -3 && pciFlr()) {
+            fwOwn();
+            if (drvOwn() > 0) rc = hwStart();
+        }
+        setNum("MtkAttachRecoverResult", (uint32_t)rc);
+    }
+    if (rc) return rc;
     setProperty("MtkMilestone", "W6");
     // 0.9.0: station ready, then the front end (link down) and the tick; the connection manager scans and joins
     if (hwInit() == 0) {
@@ -449,4 +481,49 @@ int MtkWlan::bringUp() {
     setNum("MtkRxEvents", rxEvents);
     setNum("MtkRxUnmatched", rxUnmatched);
     return 0;
+}
+
+// PCIe function level reset, the last resort when WFSYS reset did not bring the chip back. Config space (BARs, MSI)
+// is saved and restored around it by IOPCIFamily, as for sleep. false when the card does not offer FLR.
+bool MtkWlan::pciFlr() {
+    uint8_t cap = 0;
+    if (!pci->findPCICapability(kIOPCIPCIExpressCapability, &cap) || !cap) { flrUnsupported++; return false; }
+    if (!(pci->configRead32(cap + 4) & (1u << 28))) {            // Device Capabilities: Function Level Reset
+        flrUnsupported++;
+        setNum("MtkFlrUnsupported", flrUnsupported);
+        return false;
+    }
+    if (irqIndex >= 0) pci->disableInterrupt(irqIndex);
+    pci->saveDeviceState();
+    pci->configWrite16(cap + 8, pci->configRead16(cap + 8) | (1u << 15));   // Device Control: Initiate FLR
+    IOSleep(100);                                                 // PCIe: 100 ms before the function is used again
+    pci->restoreDeviceState();
+    pci->setMemoryEnable(true);
+    pci->setBusMasterEnable(true);
+    if (irqIndex >= 0) pci->enableInterrupt(irqIndex);
+    attachFlr++;
+    setNum("MtkFlr", attachFlr);
+    IOLog("MtkWlan: PCIe function level reset done\n");
+    return true;
+}
+
+// mt7925_pci_shutdown -> mt7925e_unregister_device: driver own, DMA off, WFSYS reset. Without it a warm restart
+// leaves the firmware running and the DMA rings pointing at freed host memory; the next boot's patch download fails
+// (N-177, "W3 fail: patch download") and the card can drop off the bus until a cold power-off (I-081)
+void MtkWlan::quiesce(const char *why) {
+    if (quiesced || !pci || !mmio) return;
+    quiesced = true;
+    if (timer) timer->cancelTimeout();
+    if (irqIndex >= 0) pci->disableInterrupt(irqIndex);
+    rawWrite(WFDMA0_HOST_INT_ENA, 0);
+    rawWrite(PCIE_MAC_INT_ENABLE, 0);
+    int drv = drvOwn();
+    rawWrite(WFDMA0_GLO_CFG, rawRead(WFDMA0_GLO_CFG) & ~(GLO_TX_DMA_EN | GLO_RX_DMA_EN));
+    bool idle = pollMsec(WFDMA0_GLO_CFG, GLO_TX_DMA_BUSY | GLO_RX_DMA_BUSY, 0, 100, 1);
+    rmw(WFSYS_SW_RST_B_REG, 1u << 0, 0);
+    IOSleep(50);
+    rmw(WFSYS_SW_RST_B_REG, 1u << 0, 1u << 0);
+    bool rst = pollMsec(WFSYS_SW_RST_B_REG, 1u << 4, 1u << 4, 500, 10);
+    pci->setBusMasterEnable(false);                               // no DMA into host memory past this point
+    IOLog("MtkWlan: quiesced for %s (drv_own %d, dma idle %d, wfsys reset %d)\n", why, drv, idle, rst);
 }

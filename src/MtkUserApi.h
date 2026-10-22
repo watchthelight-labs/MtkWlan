@@ -25,7 +25,9 @@ enum {
 };
 
 // kMtkUcTune keys: data path limits that can be swept live instead of one value per boot
-enum { MTK_TUNE_TX_INFLIGHT_BA = 1, MTK_TUNE_TX_INFLIGHT = 2 };
+enum { MTK_TUNE_TX_INFLIGHT_BA = 1, MTK_TUNE_TX_INFLIGHT = 2,
+       MTK_TUNE_STALL_SEC = 3,      // 0.12.0: link supervisor threshold in seconds, 0 = off
+       MTK_TUNE_STALL_TEST = 4 };   // 0.12.0: 1 = ignore received frames so the supervisor trips (test), 0 = normal
 
 // security / akm / cipher bits in mtk_scan_result
 enum { MTK_SEC_OPEN = 0, MTK_SEC_WEP = 1, MTK_SEC_WPA1 = 2, MTK_SEC_RSN = 3 };
