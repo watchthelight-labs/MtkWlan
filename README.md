@@ -225,6 +225,7 @@ The driver claims the card from its firmware, sets up the WFDMA rings, downloads
 
 - Linux **mt76** (MediaTek, Felix Fietkau and contributors, ISC): nearly everything about how the hardware works.
 - **itlmt7925** by thanhnndev and contributors (Clear BSD): the join sequence, the post-firmware setup and the WPA2 crypto primitives started there.
+- **itlmt7922-wifi** by hbyonly1 ([hbyonly1/itlmt7922-wifi](https://github.com/hbyonly1/itlmt7922-wifi), Clear BSD): an MT7922/RZ616 port of itlmt7925 for the older Connac2 firmware family; its porting notes are where MT7922 testers should start.
 - **itlwm** (OpenIntelWireless): the idea of a Wi-Fi kext that presents itself as Ethernet.
 - **RealtekRTL8111** (Mieze): the usual shape of an IOEthernetController kext.
 - hostap's **wpa_supplicant**: the handshake rules, read, not copied.
