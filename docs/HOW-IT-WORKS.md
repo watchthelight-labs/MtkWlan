@@ -100,7 +100,7 @@ Callbacks must not sleep and must not call back into `tx` or `set_enabled`. The 
 - WPA3-SAE, PSK-SHA256 (EAPOL descriptor version 3), management frame protection, fast transition and enterprise authentication.
 - Roaming between BSSIDs of one SSID.
 - HE (802.11ax) and EHT; the association is VHT at 80 MHz.
-- A native front end that gives macOS a real Wi-Fi interface (menu, AirDrop, Continuity). The ops table is shaped for it; the kext does not exist yet.
+- A native front end that gives macOS a real Wi-Fi interface (menu, AirDrop, Continuity). The ops table is shaped for it, and that kext is now [mt7925-hackintosh-wifi-native](https://github.com/watchthelight-labs/mt7925-hackintosh-wifi-native).
 - Sleep and wake. The laptop this runs on has sleep disabled.
 - Recovery after `fwDead`: three firmware command timeouts in a row stop the machines until a reboot.
 - Matching a SCAN_DONE or ROC grant event to the request that caused it; the machines use deadlines instead.
