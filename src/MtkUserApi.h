@@ -11,7 +11,7 @@
 
 #define MTK_USER_API_VERSION   1
 #define MTK_USER_CLIENT_CLASS  "MtkWlanUserClient"
-#define MTK_SCAN_MAX           48     // BSS cache entries; also the most results one call returns
+#define MTK_SCAN_MAX           48     // the most results one get_scan_results call returns (the core caches more)
 
 // IOUserClient selectors (IOConnectCall*Method)
 enum {

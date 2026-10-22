@@ -52,6 +52,9 @@ struct MtkRxTid {
 };
 
 // One BSS from beacons / probe responses (W1 cache)
+// Bigger than MTK_SCAN_MAX: one scan in a dense area hears more than 48 BSSs (thanhnndev/ga403wm-hackintosh 4257353)
+#define MTK_BSS_CACHE 128
+
 struct MtkBss {
     uint8_t bssid[6];
     char ssid[33];
@@ -61,6 +64,7 @@ struct MtkBss {
     uint8_t probe;                             // the last frame heard was a probe response (else a beacon)
     uint16_t cap, bcnInt, rsnCaps;
     uint32_t lastSeen;                         // ticks
+    uint32_t seenGen;                          // bssGen of the scan that last heard it
     uint16_t seen, ieLen;
     uint8_t ie[512];                           // information elements after the fixed fields (same cap as tgtIe)
 };
@@ -282,8 +286,9 @@ private:
     uint32_t rxFrames = 0, rxBeacons = 0, rxOther = 0;
 
     // W1 scan machine and BSS cache
-    MtkBss bss[MTK_SCAN_MAX];
+    MtkBss bss[MTK_BSS_CACHE];
     int nBss = 0;
+    uint32_t bssGen = 0;                       // bumped per scan, see MtkBss::seenGen
     bool scanRunning = false, scanWanted = false, scanEverDone = false;
     uint32_t scanStartedAt = 0, scanDoneAt = 0, scanFinishedAt = 0, scans = 0, scanFails = 0;
     uint8_t scanSeq = 0;

@@ -279,13 +279,19 @@ void MtkWlan::bssNote(const uint8_t *frame, uint32_t len, const char *ssid, uint
     for (int i = 0; i < nBss; i++)
         if (!memcmp(bss[i].bssid, bssid, 6)) { idx = i; break; }
     if (idx < 0) {
-        if (nBss < MTK_SCAN_MAX) {
+        if (nBss < MTK_BSS_CACHE) {
             idx = nBss++;
         } else {
+            // full: drop the oldest entry this scan has not heard; 2.4 GHz finds would otherwise lose to the 5 GHz
+            // channels scanned after them
             uint32_t oldest = 0;
+            bool stale = false;
             for (int i = 0; i < nBss; i++) {
                 if (joinState && !memcmp(bss[i].bssid, tgtBssid, 6)) continue;
-                if (idx < 0 || ticks - bss[i].lastSeen > oldest) { idx = i; oldest = ticks - bss[i].lastSeen; }
+                bool s = bss[i].seenGen != bssGen;
+                if (idx < 0 || (s != stale ? s : ticks - bss[i].lastSeen > oldest)) {
+                    idx = i; oldest = ticks - bss[i].lastSeen; stale = s;
+                }
             }
             if (idx < 0) return;
         }
@@ -305,6 +311,7 @@ void MtkWlan::bssNote(const uint8_t *frame, uint32_t len, const char *ssid, uint
     memcpy(b.ie, frame + 36, n);
     b.ieLen = (uint16_t)n;
     b.lastSeen = ticks;
+    b.seenGen = bssGen;
     b.seen++;
     bssParseSec(b);
     b.flags &= (uint8_t)~(MTK_BSS_JOINABLE | MTK_BSS_CURRENT);
@@ -528,6 +535,7 @@ int MtkWlan::scanStart() {
     uint32_t n2 = sizeof(kCh2), n5 = sizeof(kCh5);
     uint8_t *w = sc;
     scanSeq = (uint8_t)((scanSeq % 0x7f) + 1);
+    bssGen++;
     w[0] = (uint8_t)(0x80 | scanSeq);             // seq_num | band_idx << 7 (0xff truncates to 1)
     w += 4;
     put16(w, 1); put16(w + 2, 20);                // UNI_SCAN_REQ

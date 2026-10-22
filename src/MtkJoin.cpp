@@ -578,8 +578,7 @@ void MtkWlan::joinService() {
             }
             setNum("MtkW5BssUp", (uint32_t)bssInfo(true));
             setNum("MtkW5StaAssoc", (uint32_t)staRec(2, false, aid));
-            roc(false);
-            rocHeld = false;
+            if (!tgtRsn) { roc(false); rocHeld = false; }   // WPA2: joinUp releases it (mt76 fddc43d)
             linkUp = true;
             joinedOnce = true;
             lastTxTick = ticks;
@@ -610,6 +609,8 @@ void MtkWlan::joinService() {
 
 // The port is open: tell the front end and the manager
 void MtkWlan::joinUp() {
+    // held across the 4-way handshake: releasing it right after association made the chip miss message 3
+    if (rocHeld) { roc(false); rocHeld = false; }
     portOpen = true;
     joinState = 5;
     linkUpAt = ticks;
@@ -886,7 +887,7 @@ void MtkWlan::coreStatus(mtk_status *out) {
 
 // Copy up to max cache entries, best first
 uint32_t MtkWlan::coreResults(mtk_scan_result *out, uint32_t max) {
-    bool used[MTK_SCAN_MAX] = {};
+    bool used[MTK_BSS_CACHE] = {};
     uint32_t n = 0;
     while (n < max && (int)n < nBss) {
         int best = -1, bestScore = 0;
@@ -919,7 +920,7 @@ uint32_t MtkWlan::coreResults(mtk_scan_result *out, uint32_t max) {
 // The cached BSS at index in best-first order (as coreResults), with its elements
 int MtkWlan::coreGetBss(uint32_t index, mtk_bss_info *out) {
     if (!out || (int)index >= nBss) return -1;
-    bool used[MTK_SCAN_MAX] = {};
+    bool used[MTK_BSS_CACHE] = {};
     int best = -1;
     for (uint32_t n = 0; n <= index; n++) {
         best = -1;

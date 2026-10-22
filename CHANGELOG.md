@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased (branch scan-cache-roc, built, not yet tested on hardware)
+
+- The BSS cache holds 128 networks instead of 48, and when it is full it drops the oldest network the running scan has not heard. In a crowded place one scan can hear more than 48 networks; the 5 GHz channels are scanned after 2.4 GHz, so the 2.4 GHz finds were the oldest and got evicted before the scan ended. Found and fixed first by thanhnndev in [ga403wm-hackintosh 4257353](https://github.com/thanhnndev/ga403wm-hackintosh/commit/4257353065b34181b42993c946fb0956c47c6e32) (Clear BSD). `MTK_SCAN_MAX` stays 48: it is now only the most results one `get_scan_results` call returns.
+- WPA2 joins keep the join ROC until the keys are installed instead of releasing it right after association. Releasing it just before message 2 made the chip miss message 3 and its retries for several ms, so the handshake could end with reason 15. Ported from mt76 [fddc43d](https://github.com/openwrt/mt76/commit/fddc43d51481ca8c0e2d16a88caaca528791f359) (Mark Anthony Agarro, Devin Wittmayer). We had not seen this failure ourselves.
+
 ## 0.11.3 (2026-10-18)
 
 - Tx data ring 256 -> 1024 slots. The in-flight cap stays at 128 frames with a Tx block-ack session (32 without).
