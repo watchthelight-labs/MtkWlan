@@ -27,6 +27,21 @@ import os, re, sys
 root = sys.argv[1]
 macs, ssids = {}, {}
 mac_re = re.compile(r'\b([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\b')
+# netstat prints MACs without leading zeros; uname prints the Bonjour host name; IPv6 addresses carry the ISP prefix and,
+# for EUI-64 ones (the router's link-local address), the MAC itself
+mac_short_re = re.compile(r'(?<![\w:.-])((?:[0-9A-Fa-f]{1,2}:){5}[0-9A-Fa-f]{1,2})(?![\w:])')
+host_re = re.compile(r'(?<![\w.-])([A-Za-z0-9][A-Za-z0-9-]{1,62})\.local\b')
+ip6_re = re.compile(r'(?<![\w:])((?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4})(?![\w:])')
+hosts, ip6s = {}, {}
+def mac_short(m):
+    v = ':'.join(g.zfill(2) for g in m.group(1).lower().split(':'))
+    return mac(re.match(r'(.*)', v))
+def host(m):
+    return hosts.setdefault(m.group(1), 'host-%d' % (len(hosts) + 1)) + '.local'
+def ip6(m):
+    v = m.group(1)
+    if not ('::' in v or v.count(':') == 7) or v.lower() in ('::1', 'fe80::1', 'fe80::', '::'): return v
+    return ip6s.setdefault(v.lower(), 'ip6-%d' % (len(ip6s) + 1))
 ssid_res = [re.compile(r'(ssid[=:\s"\']+)([^"\',\s<>)]{1,32})', re.I), re.compile(r'("Mtk(?:Target|Want)?Ssid" = ")([^"]*)'), re.compile(r'(SSID\s*:\s*)(\S.*)$', re.M)]
 def mac(m):
     k = m.group(1).lower()
@@ -40,9 +55,12 @@ for name in os.listdir(root):
     if not name.endswith('.txt'): continue
     t = open(p, errors='replace').read()
     t = mac_re.sub(mac, t)
+    t = ip6_re.sub(ip6, t)
+    t = mac_short_re.sub(mac_short, t)
+    t = host_re.sub(host, t)
     for r in ssid_res: t = r.sub(ssid, t)
     open(p, 'w').write(t)
-open(os.path.join(root, 'REDACTED.txt'), 'w').write('%d MAC addresses and %d SSIDs replaced by placeholders (same placeholder for the same value throughout).\n' % (len(macs), len(ssids)))
+open(os.path.join(root, 'REDACTED.txt'), 'w').write('%d MAC addresses, %d IPv6 addresses, %d host names and %d SSIDs replaced by placeholders (same placeholder for the same value throughout).\n' % (len(macs), len(ip6s), len(hosts), len(ssids)))
 PY
 fi
 A=~/Desktop/$(basename "$OUT").tar.gz
