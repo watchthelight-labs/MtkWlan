@@ -13,6 +13,7 @@
 #include "MtkWlan.hpp"
 #include "MtkCrypto.h"
 #include <pexpert/pexpert.h>
+#include <IOKit/IOMessage.h>
 
 OSDefineMetaClassAndStructors(MtkWlan, IOService)
 
@@ -103,7 +104,31 @@ bool MtkWlan::start(IOService *provider) {
             strlcpy(autoOpenSsids[nAutoOpenSsids++], s->getCStringNoCopy(), 33);
         }
     }
-    autoOpen = nAutoOpenSsids > 0;
+    // MtkAutoNetworks: WPA2 networks for a machine without the native menu (installer, other macOS builds); each entry
+    // {Ssid, Pmk} with the PMK as 64 hex digits (mtkwifi pmk prints one), never a passphrase
+    if (OSArray *list = OSDynamicCast(OSArray, getProperty("MtkAutoNetworks"))) {
+        for (unsigned i = 0; i < list->getCount() && nAutoNets < 4; i++) {
+            OSDictionary *d = OSDynamicCast(OSDictionary, list->getObject(i));
+            OSString *ssid = d ? OSDynamicCast(OSString, d->getObject("Ssid")) : nullptr;
+            OSString *pmk = d ? OSDynamicCast(OSString, d->getObject("Pmk")) : nullptr;
+            if (!ssid || !pmk || !ssid->getLength() || ssid->getLength() > 32) continue;
+            AutoNet &n = autoNets[nAutoNets];
+            if (mtk_hex_pmk(pmk->getCStringNoCopy(), n.pmk)) continue;
+            n.ssidLen = (uint8_t)ssid->getLength();
+            memcpy(n.ssid, ssid->getCStringNoCopy(), n.ssidLen);
+            nAutoNets++;
+        }
+        removeProperty("MtkAutoNetworks");      // the keys do not stay readable in the registry
+        setNum("MtkAutoNetworkCount", nAutoNets);
+    }
+    autoOpen = autoAllowed();
+    // link supervisor (I-096): seconds of a dead link before it acts, 0 = off; boot-arg mtkstall= overrides
+    uint32_t stallSec = 8;
+    if (OSNumber *n = OSDynamicCast(OSNumber, getProperty("MtkStallSec"))) stallSec = n->unsigned32BitValue();
+    PE_parse_boot_argn("mtkstall", &stallSec, sizeof(stallSec));
+    if (stallSec > 600) stallSec = 600;
+    mtk_super_init(&super, stallSec * 1000);
+    setNum("MtkStallSec", stallSec);
     // 0.10.0: which front end owns the data path. MtkFrontEnd "native" waits for MtkWlanNative.kext (falls back to the
     // Ethernet front end if it declines or stays away); boot-arg mtkfe=native|ethernet overrides the plist
     if (OSString *feStr = OSDynamicCast(OSString, getProperty("MtkFrontEnd"))) feNativeWanted = feStr->isEqualTo("native");
@@ -146,6 +171,11 @@ bool MtkWlan::start(IOService *provider) {
     setNum("MtkFwOwnTries", (uint32_t)fw);
     int drv = drvOwn();
     setNum("MtkDrvOwnTries", (uint32_t)drv);
+    if (drv < 0 && pciFlr()) {                  // I-081: a chip left wedged by a warm restart
+        fw = fwOwn();
+        drv = drvOwn();
+        setNum("MtkDrvOwnTriesAfterFlr", (uint32_t)drv);
+    }
     setNum("MtkLpctl", rr(MT_CONN_ON_LPCTL));
     if (drv < 0) {
         setNum("MtkBadAccess", badAccess);
@@ -170,13 +200,47 @@ bool MtkWlan::start(IOService *provider) {
 
     mapper = IOMapper::copyMapperForDevice(pci);
     setProperty("MtkMapper", mapper ? "device mapper" : "none (physical addresses)");
+    // join the power plane before bring-up, so restart and power-off reach systemWillShutdown even when the firmware
+    // download failed (I-081)
+    static IOPMPowerState powerStates[2] = {
+        {kIOPMPowerStateVersion1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+        {kIOPMPowerStateVersion1, kIOPMPowerOn, kIOPMPowerOn, kIOPMPowerOn, 0, 0, 0, 0, 0, 0, 0, 0},
+    };
+    PMinit();
+    provider->joinPMtree(this);
+    pmJoined = registerPowerDriver(this, powerStates, 2) == kIOReturnSuccess;
+    setProperty("MtkPmJoined", pmJoined);
     bringUp();
     setNum("MtkBadAccess", badAccess);
     registerService();
     return true;
 }
 
+// Sleep is off on this machine; system sleep and wake only need an acknowledgement
+IOReturn MtkWlan::setPowerState(unsigned long state, IOService *device) {
+    return kIOPMAckImplied;
+}
+
+// On the gate, so no tick or front-end call touches the chip while it is being reset
+void MtkWlan::systemWillShutdown(IOOptionBits specifier) {
+    if (specifier == kIOMessageSystemWillPowerOff || specifier == kIOMessageSystemWillRestart) {
+        const char *why = specifier == kIOMessageSystemWillRestart ? "restart" : "power off";
+        if (workLoop)
+            workLoop->runAction([](OSObject *o, void *w, void *, void *, void *) -> IOReturn {
+                static_cast<MtkWlan *>(o)->quiesce((const char *)w);
+                return kIOReturnSuccess;
+            }, this, (void *)why);
+        else
+            quiesce(why);
+    }
+    IOService::systemWillShutdown(specifier);
+}
+
 void MtkWlan::stop(IOService *provider) {
+    if (pmJoined) {
+        PMstop();
+        pmJoined = false;
+    }
     if (timer) {
         timer->cancelTimeout();
         if (workLoop) workLoop->removeEventSource(timer);
@@ -184,6 +248,7 @@ void MtkWlan::stop(IOService *provider) {
     }
     secReset();
     mtk_zero(wantPmk, sizeof(wantPmk));
+    mtk_zero(autoNets, sizeof(autoNets));
     // the front end (child) is stopped before its provider; its stop already removed the callbacks
     if (irqIndex >= 0) {
         pci->disableInterrupt(irqIndex);

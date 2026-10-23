@@ -10,6 +10,7 @@
 //   mtkwifi forget <ssid>              remove a saved network (root)
 //   mtkwifi networks                   list saved SSIDs
 //   mtkwifi autojoin [--wait SECONDS]  wait for the driver, scan, join the first saved network in range (the LaunchDaemon)
+//   mtkwifi pmk <ssid>                 asks for the passphrase, prints an MtkAutoNetworks entry for MtkWlan's Info.plist
 // The passphrase is never written anywhere: the PMK (PBKDF2-SHA1, mtk_wpa_pmk from the kext's own MtkCrypto.c) goes
 // to /Library/Application Support/legion/mtkwifi/networks.plist, root only, mode 0600, outside the repository.
 
@@ -56,7 +57,7 @@ static void sleep_ms(unsigned ms) {
 
 static io_connect_t open_driver(int wait_s) {
     for (int i = 0;; i++) {
-        io_service_t svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("MtkWlan"));
+        io_service_t svc = IOServiceGetMatchingService(MACH_PORT_NULL, IOServiceMatching("MtkWlan"));
         if (svc) {
             io_connect_t conn = 0;
             kern_return_t kr = IOServiceOpen(svc, mach_task_self(), 0, &conn);
@@ -341,6 +342,27 @@ static void check_ssid(const char *ssid) {
     if (l < 1 || l > 32) die("an SSID has 1 to 32 bytes");
 }
 
+// An MtkAutoNetworks entry for a machine without the native menu (installer, Recovery on another build). Needs no driver.
+static int cmd_pmk(const char *ssid) {
+    check_ssid(ssid);
+    uint8_t pmk[32];
+    ask_pmk(ssid, pmk, 1);
+    printf("\t\t\t\t<dict>\n\t\t\t\t\t<key>Ssid</key>\n\t\t\t\t\t<string>");
+    for (const char *p = ssid; *p; p++) {
+        if (*p == '&') fputs("&amp;", stdout);
+        else if (*p == '<') fputs("&lt;", stdout);
+        else if (*p == '>') fputs("&gt;", stdout);
+        else putchar(*p);
+    }
+    printf("</string>\n\t\t\t\t\t<key>Pmk</key>\n\t\t\t\t\t<string>");
+    for (int i = 0; i < 32; i++) printf("%02x", pmk[i]);
+    printf("</string>\n\t\t\t\t</dict>\n");
+    mtk_zero(pmk, sizeof(pmk));
+    fprintf(stderr, "paste it into the MtkAutoNetworks array of MtkWlan.kext/Contents/Info.plist; anyone who can read "
+                    "that file can join this network\n");
+    return 0;
+}
+
 static int cmd_add(const char *ssid, int open) {
     check_ssid(ssid);
     if (load_nets()) die("cannot read %s", kNetFile);
@@ -500,7 +522,7 @@ static int cmd_autojoin(io_connect_t c) {
 static void usage(void) __attribute__((noreturn));
 static void usage(void) {
     fputs("usage: mtkwifi status [--json] | scan [--wait] | list [--json] | join <ssid> [--bssid X] [--open|--ask] |\n"
-          "       disconnect | add <ssid> [--open] | forget <ssid> | networks | autojoin [--wait SECONDS]\n", stderr);
+          "       disconnect | add <ssid> [--open] | forget <ssid> | networks | autojoin [--wait SECONDS] | pmk <ssid>\n", stderr);
     exit(2);
 }
 
@@ -522,6 +544,7 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "add")) { if (!ssid) usage(); return cmd_add(ssid, open); }
     if (!strcmp(cmd, "forget")) { if (!ssid) usage(); return cmd_forget(ssid); }
     if (!strcmp(cmd, "networks")) return cmd_networks();
+    if (!strcmp(cmd, "pmk")) { if (!ssid) usage(); return cmd_pmk(ssid); }
 
     io_connect_t c = open_driver(!strcmp(cmd, "autojoin") ? (wait_s ? wait_s : 60) : 0);
     int rc = 0;

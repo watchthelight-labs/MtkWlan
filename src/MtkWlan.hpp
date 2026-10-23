@@ -29,6 +29,7 @@
 #include "MtkDma.hpp"
 #include "MtkCoreApi.h"
 #include "MtkSupp.h"
+#include "MtkSuper.h"
 
 // One WFDMA ring (mt76_queue): descriptors plus one fixed buffer per slot
 struct MtkRing {
@@ -52,6 +53,9 @@ struct MtkRxTid {
 };
 
 // One BSS from beacons / probe responses (W1 cache)
+// Bigger than MTK_SCAN_MAX: one scan in a dense area hears more than 48 BSSs (thanhnndev/ga403wm-hackintosh 4257353)
+#define MTK_BSS_CACHE 128
+
 struct MtkBss {
     uint8_t bssid[6];
     char ssid[33];
@@ -61,6 +65,7 @@ struct MtkBss {
     uint8_t probe;                             // the last frame heard was a probe response (else a beacon)
     uint16_t cap, bcnInt, rsnCaps;
     uint32_t lastSeen;                         // ticks
+    uint32_t seenGen;                          // bssGen of the scan that last heard it
     uint16_t seen, ieLen;
     uint8_t ie[512];                           // information elements after the fixed fields (same cap as tgtIe)
 };
@@ -72,6 +77,9 @@ public:
     bool start(IOService *provider) override;
     void stop(IOService *provider) override;
     void free() override;
+    // I-081: restart and power-off quiesce the chip so the next OS (or Recovery) finds it clean
+    IOReturn setPowerState(unsigned long state, IOService *device) override;
+    void systemWillShutdown(IOOptionBits specifier) override;
 
     // The core's work loop: the tick, RX and every front-end callback run on its gate
     IOWorkLoop *getWorkLoop() const override;
@@ -100,7 +108,12 @@ private:
 
     // MtkFw.cpp: W2/W3
     int bringUp();
+    int hwStart();
+    bool pciFlr();
+    void quiesce(const char *why);
+    int reload(const char *why);
     int ringAlloc(MtkRing &r, bool rx, uint16_t idx, uint16_t n, uint32_t bufSize);
+    void ringReset(MtkRing &r);
     void ringFree(MtkRing &r) { r.desc.free(); r.bufs.free(); }
     volatile uint32_t *desc(MtkRing &r, uint16_t i) { return (volatile uint32_t *)(r.desc.va + i * 16); }
     void rxArm(MtkRing &r);
@@ -122,7 +135,7 @@ private:
     int uniCmd(uint8_t cid, const void *payload, uint32_t plen, bool query, uint8_t *ev, uint32_t evMax, uint32_t *evLen);
     void pollRx();
     void mtkParseFrame(const uint8_t *p, uint32_t len);
-    int hwInit();
+    int hwInit(bool keepMac = false);
     int devInfo(bool enable);
     int scanStart();
     void scanService();
@@ -160,6 +173,7 @@ private:
     void cmService();
     int cmPick();
     int cmPickOpen();
+    int cmPickSaved(int *net);
     void cmResult(uint32_t result);
     int coreScan();
     int coreJoin(const mtk_join_params *p);
@@ -253,7 +267,8 @@ private:
     void rxBar(const uint8_t *f, uint32_t flen);
     void linkLost();
     void reportLink();
-    void keepalive();
+    void keepalive(bool status = false);
+    void stallService();
     static void timerFired(OSObject *owner, IOTimerEventSource *sender);
     void tick();
     void publishW6();
@@ -282,8 +297,9 @@ private:
     uint32_t rxFrames = 0, rxBeacons = 0, rxOther = 0;
 
     // W1 scan machine and BSS cache
-    MtkBss bss[MTK_SCAN_MAX];
+    MtkBss bss[MTK_BSS_CACHE];
     int nBss = 0;
+    uint32_t bssGen = 0;                       // bumped per scan, see MtkBss::seenGen
     bool scanRunning = false, scanWanted = false, scanEverDone = false;
     uint32_t scanStartedAt = 0, scanDoneAt = 0, scanFinishedAt = 0, scans = 0, scanFails = 0;
     uint8_t scanSeq = 0;
@@ -331,6 +347,10 @@ private:
     uint8_t wantSsid[32] = {}, wantSsidLen = 0, wantBssid[6] = {}, wantPmk[32] = {};
     char autoOpenSsids[4][33] = {};            // MtkAutoOpenSsids: exact SSIDs the fallback may join
     uint8_t nAutoOpenSsids = 0;
+    struct AutoNet { uint8_t ssid[32]; uint8_t ssidLen; uint8_t pmk[32]; };
+    AutoNet autoNets[4] = {};                  // MtkAutoNetworks: WPA2 networks the fallback may join, PMK only
+    uint8_t nAutoNets = 0;
+    bool autoAllowed() const { return nAutoOpenSsids + nAutoNets > 0; }
     uint32_t cmNextAt = 0, cmFails = 0, cmLastScanAt = 0, wantMissingSince = 0, cmRuns = 0, cmLastPickAt = 0, linkUpAt = 0;
     uint8_t cmLastBssid[6] = {};
     bool cmKick = false, switchPending = false, disconnectPending = false, rejoinPending = false;
@@ -364,6 +384,12 @@ private:
     // W6 data path; the network interface belongs to the front end (fe, set through the ops table)
     IOWorkLoop *workLoop = nullptr;
     IOTimerEventSource *timer = nullptr;
+    bool pmJoined = false, quiesced = false;   // power plane membership (systemWillShutdown), quiesce done once
+    // attach recovery and the link supervisor (MtkSuper.c)
+    uint32_t attachRecover = 0, attachFlr = 0, flrUnsupported = 0;
+    mtk_super super = {};
+    uint32_t stallReloadFails = 0, stallLastReloadMs = 0;
+    bool stallFreezeRx = false;                // debug (kMtkUcStallTest): ignore the Rx ring so the supervisor trips
     IOService *frontEnd = nullptr;             // MtkWlanEth child, created by startFrontEnd()
     mtk_fe_callbacks fe = {};                  // all null while no front end is registered
     // 0.10.0: front-end selection (MtkFrontEnd / boot-arg mtkfe). With "native" the core publishes itself and waits for
@@ -383,7 +409,7 @@ private:
              rxOwn = 0, rxDropped = 0;
     uint32_t deauths = 0, lastDeauth = 0, rejoins = 0, keepalives = 0;
     uint32_t rxTypes[32] = {};
-    uint32_t txInFlight = 0, txInFlightPeak = 0, txCapped = 0;
+    uint32_t txInFlight = 0, txInFlightPeak = 0, txCapped = 0, txQueued = 0;
     bool w6Pass = false;
 
     // W8 HT/VHT: the AP's capabilities from its beacon, and what the association settled on

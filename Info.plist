@@ -15,11 +15,11 @@
 	<key>CFBundlePackageType</key>
 	<string>KEXT</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.11.3</string>
+	<string>0.12.0</string>
 	<key>CFBundleSignature</key>
 	<string>????</string>
 	<key>CFBundleVersion</key>
-	<string>0.11.3</string>
+	<string>0.12.0</string>
 	<key>IOKitPersonalities</key>
 	<dict>
 		<key>MT7925 PCIe</key>
@@ -34,6 +34,8 @@
 			<string>IOPCIDevice</string>
 			<key>IOUserClientClass</key>
 			<string>MtkWlanUserClient</string>
+			<key>MtkAutoNetworks</key>
+			<array/>
 			<key>MtkAutoOpenSsids</key>
 			<array>
 				<string>Boingo 5GHz</string>
@@ -51,6 +53,8 @@
 			<true/>
 			<key>MtkRxBa</key>
 			<true/>
+			<key>MtkStallSec</key>
+			<integer>8</integer>
 			<key>MtkTxBa</key>
 			<true/>
 		</dict>

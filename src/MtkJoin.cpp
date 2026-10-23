@@ -578,8 +578,7 @@ void MtkWlan::joinService() {
             }
             setNum("MtkW5BssUp", (uint32_t)bssInfo(true));
             setNum("MtkW5StaAssoc", (uint32_t)staRec(2, false, aid));
-            roc(false);
-            rocHeld = false;
+            if (!tgtRsn) { roc(false); rocHeld = false; }   // WPA2: joinUp releases it (mt76 fddc43d)
             linkUp = true;
             joinedOnce = true;
             lastTxTick = ticks;
@@ -610,6 +609,8 @@ void MtkWlan::joinService() {
 
 // The port is open: tell the front end and the manager
 void MtkWlan::joinUp() {
+    // held across the 4-way handshake: releasing it right after association made the chip miss message 3
+    if (rocHeld) { roc(false); rocHeld = false; }
     portOpen = true;
     joinState = 5;
     linkUpAt = ticks;
@@ -706,6 +707,21 @@ int MtkWlan::cmPickOpen() {
     return best;
 }
 
+// Best BSS of a saved MtkAutoNetworks entry that we can join with its PMK; *net = which entry
+int MtkWlan::cmPickSaved(int *net) {
+    int best = -1, bestScore = 0;
+    for (int i = 0; i < nBss; i++) {
+        const MtkBss &b = bss[i];
+        if (!bssJoinable(b, true)) continue;
+        for (int k = 0; k < nAutoNets; k++) {
+            if (b.ssidLen != autoNets[k].ssidLen || memcmp(b.ssid, autoNets[k].ssid, b.ssidLen)) continue;
+            int s = bssScore(b);
+            if (best < 0 || s > bestScore) { best = i; bestScore = s; *net = k; }
+        }
+    }
+    return best;
+}
+
 // Outcome of a join: reset or grow the backoff (5, 10, 20, 40, 60 s), tell a v2 front end
 void MtkWlan::cmResult(uint32_t result) {
     lastResult = result;
@@ -781,6 +797,20 @@ void MtkWlan::cmService() {
         if (!autoOpen || ticks - wantMissingSince < CM_WANT_FALLBACK_TICKS) return;
     }
     if (autoOpen && !userScanPending && !userScanRecent && !bootGrace) {
+        // a saved WPA2 network becomes the wanted one, as if it had been joined through the user client
+        int net = -1;
+        if (!wantActive && cmPickSaved(&net) >= 0) {
+            mtk_join_params p = {};
+            p.version = MTK_USER_API_VERSION;
+            p.ssid_len = autoNets[net].ssidLen;
+            memcpy(p.ssid, autoNets[net].ssid, p.ssid_len);
+            p.key_type = MTK_KEY_PMK;
+            memcpy(p.pmk, autoNets[net].pmk, 32);
+            coreJoin(&p);
+            mtk_zero(&p, sizeof(p));
+            step("W5 saved network in range (MtkAutoNetworks), joining");
+            return;
+        }
         int idx = cmPickOpen();
         if (idx >= 0) {
             if (rejoinPending) { rejoins++; rejoinPending = false; }
@@ -815,7 +845,7 @@ int MtkWlan::coreJoin(const mtk_join_params *p) {
                 (!hasPmk || mtk_ct_equal(wantPmk, p->pmk, 32)) && (!bssidGiven || !memcmp(tgtBssid, p->bssid, 6));
     if (same) return 0;
     // a join turns the open fallback back on after a disconnect, unless the native front end owns the joins
-    autoOpen = nAutoOpenSsids > 0 && !(feMode == MTK_FE_NATIVE && !(feModeFlags & MTK_FE_KEEP_AUTOOPEN));
+    autoOpen = autoAllowed() && !(feMode == MTK_FE_NATIVE && !(feModeFlags & MTK_FE_KEEP_AUTOOPEN));
     wantActive = true;
     wantHasPmk = hasPmk;
     wantSsidLen = p->ssid_len;
@@ -886,7 +916,7 @@ void MtkWlan::coreStatus(mtk_status *out) {
 
 // Copy up to max cache entries, best first
 uint32_t MtkWlan::coreResults(mtk_scan_result *out, uint32_t max) {
-    bool used[MTK_SCAN_MAX] = {};
+    bool used[MTK_BSS_CACHE] = {};
     uint32_t n = 0;
     while (n < max && (int)n < nBss) {
         int best = -1, bestScore = 0;
@@ -919,7 +949,7 @@ uint32_t MtkWlan::coreResults(mtk_scan_result *out, uint32_t max) {
 // The cached BSS at index in best-first order (as coreResults), with its elements
 int MtkWlan::coreGetBss(uint32_t index, mtk_bss_info *out) {
     if (!out || (int)index >= nBss) return -1;
-    bool used[MTK_SCAN_MAX] = {};
+    bool used[MTK_BSS_CACHE] = {};
     int best = -1;
     for (uint32_t n = 0; n <= index; n++) {
         best = -1;
@@ -989,6 +1019,8 @@ IOReturn MtkWlan::gatedUserCall(OSObject *owner, void *sel, void *in, void *out,
         if (!kv || kv[1] > 1000) return kIOReturnBadArgument;
         if (kv[0] == MTK_TUNE_TX_INFLIGHT_BA) self->txCapBa = kv[1] ? (kv[1] < 8 ? 8 : kv[1]) : 128;
         else if (kv[0] == MTK_TUNE_TX_INFLIGHT) self->txCapNoBa = kv[1] ? (kv[1] < 8 ? 8 : kv[1]) : 32;
+        else if (kv[0] == MTK_TUNE_STALL_SEC) { self->super.stall_ms = kv[1] * 1000; self->setNum("MtkStallSec", kv[1]); return kIOReturnSuccess; }
+        else if (kv[0] == MTK_TUNE_STALL_TEST) { self->stallFreezeRx = kv[1] != 0; return kIOReturnSuccess; }
         else return kIOReturnBadArgument;
         char s[64];
         snprintf(s, sizeof(s), "ba %u noba %u", self->txCapBa, self->txCapNoBa);

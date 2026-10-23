@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.12.0 (built 2026-10-22, not yet tested on hardware)
+
+- Restart and power off quiesce the chip (interrupts off, driver own, DMA off, WFSYS reset, bus master off). Before this a warm restart could leave the firmware running and the next boot failed with `W3 fail: patch download`, sometimes with the card gone from the bus until a full power off ([#1](https://github.com/watchthelight-labs/mt7925-hackintosh-wifi/issues/1)).
+- Attach recovers a wedged chip: one more WFSYS reset and a second try, then a PCIe function level reset and a third. The FLR idea comes from flxxxxddd's [SimpleMtkWlan PR #7](https://github.com/laobamac/SimpleMtkWlan/pull/7); the code here is our own.
+- Link supervisor: a link that stays associated but stops working is noticed within about 8 s. An AP that no longer acknowledges us gets a rejoin; a chip whose firmware or DMA stopped gets a reset, a firmware reload and a rejoin without detaching the interface. Inspired by thanhnndev's link-loss recovery ([ga403wm-hackintosh 5f00557](https://github.com/thanhnndev/ga403wm-hackintosh/commit/5f00557b5ed4377b6cb0f45a4e1c9cab5503163f)). `MtkStallSec` (default 8, 0 = off), boot-arg `mtkstall=`, properties `MtkStall` and `MtkStallPostMortem`.
+- `MtkAutoNetworks`: WPA2 networks the driver joins by itself when the native menu is not there (a USB installer, Recovery on another macOS build). `mtkwifi pmk <ssid>` prints an entry. Asked for in [#3](https://github.com/watchthelight-labs/mt7925-hackintosh-wifi/issues/3).
+- `tools/recovery/`: a Terminal helper for Recovery and the installer that scans, joins with a typed password (not stored) and saves a capture. On 26.7.1 Recovery the native Wi-Fi menu should work by itself: its boot kernel collection has the same IO80211Family as the installed system.
+- `mtkwifi` builds for macOS 10.15 and later, so it runs from older installers too.
+
+- The BSS cache holds 128 networks instead of 48, and when it is full it drops the oldest network the running scan has not heard. In a crowded place one scan can hear more than 48 networks; the 5 GHz channels are scanned after 2.4 GHz, so the 2.4 GHz finds were the oldest and got evicted before the scan ended. Found and fixed first by thanhnndev in [ga403wm-hackintosh 4257353](https://github.com/thanhnndev/ga403wm-hackintosh/commit/4257353065b34181b42993c946fb0956c47c6e32) (Clear BSD). `MTK_SCAN_MAX` stays 48: it is now only the most results one `get_scan_results` call returns.
+- WPA2 joins keep the join ROC until the keys are installed instead of releasing it right after association. Releasing it just before message 2 made the chip miss message 3 and its retries for several ms, so the handshake could end with reason 15. Ported from mt76 [fddc43d](https://github.com/openwrt/mt76/commit/fddc43d51481ca8c0e2d16a88caaca528791f359) (Mark Anthony Agarro, Devin Wittmayer). We had not seen this failure ourselves.
+
 ## 0.11.3 (2026-10-18)
 
 - Tx data ring 256 -> 1024 slots. The in-flight cap stays at 128 frames with a Tx block-ack session (32 without).
