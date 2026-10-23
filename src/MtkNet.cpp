@@ -519,6 +519,7 @@ void MtkWlan::tick() {
     baService();
     if (ticks % 10 == 0) rxBaTimeouts();
     if (ticks % 1000 == 0) bssAge();
+    if (countryPending && ticks % 100 == 0) countryService();
     txInflightMax = txBaState == 2 ? txCapBa : txCapNoBa;
     if (linkUp && portOpen && htActive && txBaOn && txPackets > 200 && (txBaState == 0 || (txBaState == 1 && txBaRequests < 4)) &&
         (int32_t)(ticks - txBaNextTick) >= 0)
@@ -704,6 +705,15 @@ const mtk_core_ops_v4 MtkWlan::kOpsV4 = {
     &MtkWlan::opSetMac,
 };
 
+const mtk_core_ops_v5 MtkWlan::kOpsV5 = {
+    {{{{MTK_CORE_API_V5, sizeof(mtk_core_ops_v5), &MtkWlan::opSetCallbacks, &MtkWlan::opTx, &MtkWlan::opSetEnabled,
+        &MtkWlan::opGetMac, &MtkWlan::opGetLinkInfo},
+       &MtkWlan::opScan, &MtkWlan::opResults, &MtkWlan::opJoin, &MtkWlan::opDisconnect, &MtkWlan::opStatus},
+      &MtkWlan::opSetMode, &MtkWlan::opGetBss, &MtkWlan::opGetChannels, &MtkWlan::opTxBytes},
+     &MtkWlan::opSetMac},
+    &MtkWlan::opGetRateInfo, &MtkWlan::opSetCountry,
+};
+
 IOReturn MtkWlan::callPlatformFunction(const OSSymbol *functionName, bool waitForFunction, void *param1, void *param2,
                                        void *param3, void *param4) {
     if (functionName && functionName->isEqualTo(MTK_CORE_OPS_V1)) {
@@ -727,6 +737,12 @@ IOReturn MtkWlan::callPlatformFunction(const OSSymbol *functionName, bool waitFo
     if (functionName && functionName->isEqualTo(MTK_CORE_OPS_V4)) {
         if (!param1 || !param2) return kIOReturnBadArgument;
         *(const mtk_core_ops_v4 **)param1 = &kOpsV4;
+        *(void **)param2 = this;
+        return kIOReturnSuccess;
+    }
+    if (functionName && functionName->isEqualTo(MTK_CORE_OPS_V5)) {
+        if (!param1 || !param2) return kIOReturnBadArgument;
+        *(const mtk_core_ops_v5 **)param1 = &kOpsV5;
         *(void **)param2 = this;
         return kIOReturnSuccess;
     }
@@ -843,6 +859,112 @@ void MtkWlan::opSetEnabled(void *core, int enabled) {
     MtkWlan *self = static_cast<MtkWlan *>(core);
     self->ifEnabled = enabled != 0;
     self->reportLink();
+}
+
+// 802.11 data rates in 100 kbit/s for one stream, 800 ns guard interval: HT/VHT MCS 0-9 at 20, 40, 80 MHz
+static const uint16_t kRate20[10] = { 65, 130, 195, 260, 390, 520, 585, 650, 780, 867 };
+static const uint16_t kRate40[10] = { 135, 270, 405, 540, 810, 1080, 1215, 1350, 1620, 1800 };
+static const uint16_t kRate80[10] = { 293, 585, 878, 1170, 1755, 2340, 2633, 2925, 3510, 3900 };
+// legacy rates in 100 kbit/s by hardware rate code: CCK 0-3 (4-7 short preamble), OFDM codes 8-15 (mt76 mt76_rates)
+static const uint16_t kCck[4] = { 10, 20, 55, 110 };
+static const uint16_t kOfdm[8] = { 480, 240, 120, 60, 540, 360, 180, 90 };
+
+static uint32_t phyKbps(uint8_t mcs, uint8_t nss, uint8_t bw, bool sgi) {
+    if (mcs > 9) mcs = 9;
+    uint32_t r = (bw == 2 ? kRate80 : bw == 1 ? kRate40 : kRate20)[mcs] * 100u * (nss ? nss : 1);
+    return sgi ? r * 10 / 9 : r;
+}
+
+// Rate of the last TX status (TXS0 rate: mode 9:6, nss 13:10, index 5:0; BW 31:29), else the negotiated maximum
+void MtkWlan::rateInfo(mtk_rate_info *out) const {
+    uint8_t bw = htActive ? chBw : 0;
+    bool sgi = htActive && (bw == 2 ? (apVhtCap & 0x20) : bw == 1 ? (apHtCap & 0x40) : (apHtCap & 0x20));
+    uint8_t maxMcs = 0;
+    if (vhtActive) {
+        uint8_t m = apVhtRx & 3;                  // the AP's 1-stream RX map: 0 = MCS 0-7, 1 = 0-8, 2 = 0-9
+        maxMcs = m == 2 ? 9 : m == 1 ? 8 : 7;
+        if (bw == 0 && maxMcs == 9) maxMcs = 8;   // VHT20 MCS 9 is not valid for one or two streams
+    } else if (htActive) {
+        maxMcs = 7;
+    }
+    uint8_t nss = htActive ? apNss : 1;
+    out->ap_short_gi = sgi;
+    out->max_mcs = maxMcs;
+    out->max_kbps = htActive ? phyKbps(maxMcs, nss, bw, sgi) : 54000;
+    uint32_t r = txsLast[0] & 0x3fff, mode = (r >> 6) & 0xf, idx = r & 0x3f;
+    if (txsRecords && mode <= 4) {
+        uint8_t txBw = (uint8_t)((txsLast[0] >> 29) & 7);
+        if (txBw > 2) txBw = 2;
+        out->from_txs = 1;
+        out->bw_mhz = (uint16_t)(20u << txBw);
+        out->short_gi = mode >= 2 && sgi;         // TXS carries no GI; the firmware uses short GI when both allow it
+        if (mode <= 1) {
+            out->phy = MTK_PHY_LEGACY;
+            out->nss = 1;
+            out->mcs = 0;
+            out->tx_kbps = (mode == 0 ? kCck[idx & 3] : kOfdm[idx & 7]) * 100u;
+            out->short_gi = 0;
+            return;
+        }
+        if (mode == 4) {
+            out->phy = MTK_PHY_VHT;
+            out->mcs = (uint8_t)(idx & 0xf);
+            out->nss = (uint8_t)(((r >> 10) & 0xf) + 1);
+        } else {                                  // HT / HT greenfield: the index carries the stream count
+            out->phy = MTK_PHY_HT;
+            out->mcs = (uint8_t)(idx & 7);
+            out->nss = (uint8_t)(idx / 8 + 1);
+        }
+        if (out->nss > 2) out->nss = 2;
+        out->tx_kbps = phyKbps(out->mcs, out->nss, txBw, out->short_gi);
+        return;
+    }
+    out->from_txs = 0;
+    out->phy = vhtActive ? MTK_PHY_VHT : htActive ? MTK_PHY_HT : MTK_PHY_LEGACY;
+    out->mcs = maxMcs;
+    out->nss = nss;
+    out->bw_mhz = (uint16_t)(20u << bw);
+    out->short_gi = sgi;
+    out->tx_kbps = out->max_kbps;
+}
+
+int MtkWlan::opGetRateInfo(void *core, mtk_rate_info *out) {
+    MtkWlan *self = static_cast<MtkWlan *>(core);
+    if (!out || out->size < 8) return -1;
+    mtk_rate_info r;
+    bzero(&r, sizeof(r));
+    if (!self->linkUp) return -2;
+    self->rateInfo(&r);
+    uint32_t n = out->size < sizeof(r) ? out->size : (uint32_t)sizeof(r);
+    r.size = n;
+    memcpy(out, &r, n);
+    return 0;
+}
+
+int MtkWlan::opSetCountry(void *core, const char alpha2[2]) {
+    MtkWlan *self = static_cast<MtkWlan *>(core);
+    if (!alpha2) return -1;
+    char cc[3] = { alpha2[0], alpha2[1], 0 };
+    if ((cc[0] == 'X' && cc[1] == 'Z') || (cc[0] == '0' && cc[1] == '0')) { cc[0] = '0'; cc[1] = '0'; }
+    else if (cc[0] < 'A' || cc[0] > 'Z' || cc[1] < 'A' || cc[1] > 'Z') return -1;
+    if (!memcmp(cc, self->countryWanted, 2)) return 0;
+    memcpy(self->countryWanted, cc, 3);
+    self->countryPending = true;
+    return 0;
+}
+
+// A new country goes to the firmware between scans and outside a join (domainStage sends three commands)
+void MtkWlan::countryService() {
+    if (!countryPending || fwDead) return;
+    if (joinState && !(linkUp && portOpen)) return;
+    if (scanStartedAt && !scanDone) return;
+    countryPending = false;
+    if (!memcmp(country, countryWanted, 2)) return;
+    memcpy(country, countryWanted, 3);
+    int rc = domainStage();
+    char t[64];
+    snprintf(t, sizeof(t), "country %s applied (rc %d)", country, rc);
+    step(t);
 }
 
 int MtkWlan::opGetMac(void *core, uint8_t out[6]) {

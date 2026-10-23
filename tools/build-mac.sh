@@ -50,8 +50,8 @@ cp Info.plist "$OUT/Info.plist"
 
 # offline checks: MH_KEXT_BUNDLE, kmod_info, what the kernel must resolve, no C++ runtime it lacks
 BIN=$OUT/MacOS/$NAME
-otool -hv "$BIN" | grep -q KEXTBUNDLE && echo "filetype: MH_KEXT_BUNDLE" || { echo "FAIL: not MH_KEXT_BUNDLE"; exit 1; }
-nm "$BIN" | grep -q ' _kmod_info$' && echo "kmod_info: present" || { echo "FAIL: no kmod_info"; exit 1; }
+otool -hv "$BIN" | grep KEXTBUNDLE >/dev/null && echo "filetype: MH_KEXT_BUNDLE" || { echo "FAIL: not MH_KEXT_BUNDLE"; exit 1; }
+nm "$BIN" | grep ' _kmod_info$' >/dev/null && echo "kmod_info: present" || { echo "FAIL: no kmod_info"; exit 1; }
 nm -u "$BIN" | sort > out/undefined.txt
 echo "undefined symbols: $(wc -l < out/undefined.txt | tr -d ' ') (out/undefined.txt)"
 if grep -E '^_{2,3}(cxa_|Unwind|gxx_)|^__ZTV.*__cxxabiv|^__Znw|^__Zdl' out/undefined.txt; then

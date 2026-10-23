@@ -1,6 +1,15 @@
 # Changelog
 
-## 0.12.0 (built 2026-10-22, not yet tested on hardware)
+## 0.12.1 (2026-10-23)
+
+- Core API version 5 for the native front end ([mt7925-hackintosh-wifi-native](https://github.com/watchthelight-labs/mt7925-hackintosh-wifi-native) 0.4.13):
+  - `get_rate_info` reports the link's PHY (legacy, HT, VHT), MCS, streams, width, guard interval and rate. It uses the firmware's TX status records when there are any, and the best rate the association allows otherwise.
+  - `set_country` takes the country macOS asks for. The CLC power table for that country is used, and the channel domain is sent again between scans.
+  - Outside the US and its territories, channels 12 and 13 are added as passive, and 149 to 165 become passive too. Passive means listen only until an access point is heard, so a country can only make the radio quieter than the US set, never louder.
+- `MtkCountry` property: the current country, its channel count and the firmware's answer.
+- Tested on the author's Legion 5 (N-261): joins at boot. macOS shows 11ac, 80 MHz, MCS 9, 2 streams, short GI, 866 Mbit/s for a VHT80 access point. That is the negotiated maximum, because this link produced no TX status records.
+
+## 0.12.0 (built 2026-10-22; first boot 2026-10-23 together with 0.12.1)
 
 - Restart and power off quiesce the chip (interrupts off, driver own, DMA off, WFSYS reset, bus master off). Before this a warm restart could leave the firmware running and the next boot failed with `W3 fail: patch download`, sometimes with the card gone from the bus until a full power off ([#1](https://github.com/watchthelight-labs/mt7925-hackintosh-wifi/issues/1)).
 - Attach recovers a wedged chip: one more WFSYS reset and a second try, then a PCIe function level reset and a third. The FLR idea comes from flxxxxddd's [SimpleMtkWlan PR #7](https://github.com/laobamac/SimpleMtkWlan/pull/7); the code here is our own.

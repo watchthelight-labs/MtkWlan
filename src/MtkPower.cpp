@@ -86,7 +86,7 @@ int MtkWlan::clcStage() {
         const uint8_t *data = c + 16;
         uint8_t nSeg = c[8];
         const uint8_t *pos = data + 16 * nSeg, *last = data + le32(data + 4);
-        static const char *const countries[2] = {"US", "00"};
+        const char *const countries[2] = {country, "00"};
         for (const char *cc : countries) {
             int matched = 0;
             for (const uint8_t *r = pos; r + 8 <= last; r += 8) {
@@ -136,7 +136,7 @@ int MtkWlan::ratePowerBand(bool is5g, int8_t halfDbm) {
         msg[12] = (uint8_t)num;                       // n_chan
         msg[13] = is5g ? 2 : 1;                       // band
         msg[14] = (i + num >= n) ? 1 : 0;             // last_msg
-        msg[16] = 'U'; msg[17] = 'S';                 // alpha2
+        msg[16] = (uint8_t)country[0]; msg[17] = (uint8_t)country[1];   // alpha2
         uint8_t *p = msg + 52;
         for (int j = 0; j < num; j++, p += 1 + SKU_LEN) {
             p[0] = list[i + j];

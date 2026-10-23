@@ -176,6 +176,41 @@ struct mtk_core_ops_v4 {
     int (*set_mac)(void *core, const uint8_t mac[6]);
 };
 
+// ---- version 5 (0.12.1): link rate details and the country code ----------------------------------------------------
+// MTK_CORE_OPS_V5 returns a struct mtk_core_ops_v5 whose first member is the v4 table (version 5 in it). Callbacks are
+// unchanged (a front end keeps registering with MTK_CORE_API_V4).
+#define MTK_CORE_OPS_V5      "mtk-core-ops-v5"
+#define MTK_CORE_API_V5      5
+
+enum { MTK_PHY_LEGACY = 0, MTK_PHY_HT = 1, MTK_PHY_VHT = 2, MTK_PHY_HE = 3 };
+
+// The rate of the last data frame the firmware reported sending to the AP (TX status), or the negotiated maximum
+// before the first report
+struct mtk_rate_info {
+    uint32_t size;              // sizeof(struct mtk_rate_info) the caller was built with; the core fills no more
+    uint8_t phy;                // MTK_PHY_*
+    uint8_t mcs;                // per-stream MCS (HT 0-7, VHT 0-9); 0 for legacy
+    uint8_t nss;                // spatial streams
+    uint8_t short_gi;           // 1 = 400 ns guard interval
+    uint16_t bw_mhz;            // 20 / 40 / 80
+    uint16_t from_txs;          // 1 = from a TX status record, 0 = the negotiated maximum
+    uint32_t tx_kbps;           // the rate above in kbit/s
+    uint32_t max_kbps;          // the best rate the association allows
+    uint8_t max_mcs;            // highest per-stream MCS both sides support
+    uint8_t ap_short_gi;        // the AP accepts a 400 ns guard interval at the association width
+    uint8_t _pad[2];
+};
+
+struct mtk_core_ops_v5 {
+    struct mtk_core_ops_v4 v4;
+    // Fill *out up to out->size bytes. Any thread, racy off the gate like get_link_info. 0 on success, -2 not associated.
+    int (*get_rate_info)(void *core, struct mtk_rate_info *out);
+    // The country macOS wants (ISO 3166 alpha2, upper case, or "00"/"XZ" for the world rules). It is applied when no
+    // join is in flight: the firmware's CLC power table for that country and the channel flags the core keeps for it.
+    // Channels can only become more passive than the US set, never more active. Gate held. 0 queued or unchanged.
+    int (*set_country)(void *core, const char alpha2[2]);
+};
+
 #ifdef __cplusplus
 }
 #endif

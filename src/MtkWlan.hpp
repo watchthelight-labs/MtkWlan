@@ -199,6 +199,11 @@ private:
     int clcStage();
     int ratePowerBand(bool is5g, int8_t halfDbm);
     int powerStage(bool afterDomain);
+    int domainStage();
+    uint32_t domainChannels(uint8_t *ch, uint32_t *flags, uint32_t *n2);
+    char country[3] = "US", countryWanted[3] = "US";   // 0.12.1: set_country, applied by the tick when no join runs
+    bool countryPending = false;
+    void countryService();
     int roc(bool acquire);
     void hwPrep();
     uint8_t *assocIes(uint8_t *p, bool ht);
@@ -214,7 +219,11 @@ private:
     static const mtk_core_ops_v2 kOpsV2;
     static const mtk_core_ops_v3 kOpsV3;
     static const mtk_core_ops_v4 kOpsV4;
+    static const mtk_core_ops_v5 kOpsV5;
     static int opSetMac(void *core, const uint8_t mac[6]);
+    static int opGetRateInfo(void *core, mtk_rate_info *out);
+    static int opSetCountry(void *core, const char alpha2[2]);
+    void rateInfo(mtk_rate_info *out) const;
     static int opSetMode(void *core, uint32_t mode, uint32_t flags);
     static int opGetBss(void *core, uint32_t index, mtk_bss_info *out);
     static int opGetChannels(void *core, uint8_t *list, uint32_t max, uint32_t *count);

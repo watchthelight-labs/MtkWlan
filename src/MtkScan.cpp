@@ -44,6 +44,14 @@ const uint8_t kCh2[] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
 const uint8_t kCh5[] = { 36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
                          149, 153, 157, 161, 165 };
 inline bool isDfs(uint8_t ch) { return ch >= 52 && ch <= 144; }
+// FCC countries keep the US set. Elsewhere the core adds 12-13 and makes 149-165 passive: listening is legal
+// everywhere, and an AP heard there lets the firmware transmit (mt76 beacon hint), so no table can make it louder.
+const uint8_t kCh2Extra[] = { 12, 13 };
+bool fccCountry(const char *cc) {
+    static const char *const fcc[] = { "US", "CA", "PR", "GU", "VI", "AS", "MP", "UM" };
+    for (const char *f : fcc) if (cc[0] == f[0] && cc[1] == f[1]) return true;
+    return false;
+}
 
 // mt7925_queue_rx_skb (mt7925/mac.c): RXD0 PKT_TYPE bits 31:27, PKT_FLAG bits 19:16, SW_PKT_TYPE bits 31:16.
 // A frame is PKT_TYPE_NORMAL (2), or SW_PKT_TYPE FRAME (0x3801 under mask 0x380F), or RX_EVENT (7) with
@@ -265,9 +273,25 @@ void MtkWlan::bssNoteFrame(const uint8_t *f, uint32_t flen, int8_t rssi) {
 // The primary 20 MHz channels of the domain the firmware scans (kCh2 + kCh5): what the native front end reports as
 // supported channels. Any thread: the arrays are constants.
 uint32_t MtkWlan::coreChannels(uint8_t *list, uint32_t max) {
+    uint8_t ch[sizeof(kCh2) + sizeof(kCh2Extra) + sizeof(kCh5)];
+    uint32_t n2, n = domainChannels(ch, nullptr, &n2);
+    if (n > max) n = max;
+    memcpy(list, ch, n);
+    return n;
+}
+
+// The channels of the current country: 2.4 GHz first (*n2 of them), flags (CHAN_*) per channel when asked
+uint32_t MtkWlan::domainChannels(uint8_t *ch, uint32_t *flags, uint32_t *n2) {
+    bool fcc = fccCountry(country);
     uint32_t n = 0;
-    for (uint32_t i = 0; i < sizeof(kCh2) && n < max; i++) list[n++] = kCh2[i];
-    for (uint32_t i = 0; i < sizeof(kCh5) && n < max; i++) list[n++] = kCh5[i];
+    for (uint32_t i = 0; i < sizeof(kCh2); i++, n++) { ch[n] = kCh2[i]; if (flags) flags[n] = 0; }
+    if (!fcc)
+        for (uint32_t i = 0; i < sizeof(kCh2Extra); i++, n++) { ch[n] = kCh2Extra[i]; if (flags) flags[n] = CHAN_NO_IR; }
+    *n2 = n;
+    for (uint32_t i = 0; i < sizeof(kCh5); i++, n++) {
+        ch[n] = kCh5[i];
+        if (flags) flags[n] = isDfs(kCh5[i]) ? CHAN_NO_IR | CHAN_RADAR : (!fcc && kCh5[i] >= 149) ? CHAN_NO_IR : 0;
+    }
     return n;
 }
 
@@ -496,24 +520,8 @@ int MtkWlan::hwInit(bool keepMac) {
     // 4. station interface (mt76_connac_mcu_uni_add_dev, NL80211_IFTYPE_STATION)
     setNum("MtkW4DevInfo", (uint32_t)devInfo(true));
 
-    // 5. channel domain "US", DFS channels passive (mt7925_mcu_set_channel_domain)
-    static uint8_t dom[16 + 8 * 40];
-    bzero(dom, sizeof(dom));
-    dom[0] = 'U'; dom[1] = 'S';
-    dom[4] = 0; dom[5] = 3; dom[6] = 3;           // bw_2g 20/40, bw_5g/6g up to 160
-    uint32_t n2 = sizeof(kCh2), n5 = sizeof(kCh5);
-    put16(dom + 8, 2);
-    put16(dom + 10, (uint16_t)(8 + (n2 + n5) * 8));
-    dom[12] = (uint8_t)n2; dom[13] = (uint8_t)n5; dom[14] = 0;
-    uint8_t *w = dom + 16;
-    for (uint32_t i = 0; i < n2; i++, w += 8) put16(w, kCh2[i]);
-    for (uint32_t i = 0; i < n5; i++, w += 8) {
-        put16(w, kCh5[i]);
-        if (isDfs(kCh5[i])) put32(w + 4, CHAN_NO_IR | CHAN_RADAR);
-    }
-    powerStage(false);                          // CLC country tables first (mt7925_regd_update order)
-    setNum("MtkW4Domain", (uint32_t)uniCmd(UNI_SET_DOMAIN_INFO, dom, (uint32_t)(w - dom), false, nullptr, 0, nullptr));
-    powerStage(true);                           // then the per-rate limits
+    // 5. channel domain of the country (US until macOS sets one), DFS channels passive
+    domainStage();
 
     // __mt7925_start: RTS threshold 0x92b (mt7925_mcu_set_rts_thresh)
     uint8_t rts[16] = {0, 0, 0, 0, 0x08, 0, 12, 0, 0x2b, 0x09, 0, 0, 2, 0, 0, 0};
@@ -530,12 +538,36 @@ int MtkWlan::hwInit(bool keepMac) {
     return 0;
 }
 
+// mt7925_regd_update order: CLC country tables, the channel domain (mt7925_mcu_set_channel_domain), the per-rate limits
+int MtkWlan::domainStage() {
+    static uint8_t dom[16 + 8 * 48];
+    bzero(dom, sizeof(dom));
+    uint8_t ch[48];
+    uint32_t fl[48], n2, n = domainChannels(ch, fl, &n2);
+    dom[0] = (uint8_t)country[0]; dom[1] = (uint8_t)country[1];
+    dom[4] = 0; dom[5] = 3; dom[6] = 3;           // bw_2g 20/40, bw_5g/6g up to 160
+    put16(dom + 8, 2);
+    put16(dom + 10, (uint16_t)(8 + n * 8));
+    dom[12] = (uint8_t)n2; dom[13] = (uint8_t)(n - n2); dom[14] = 0;
+    uint8_t *w = dom + 16;
+    for (uint32_t i = 0; i < n; i++, w += 8) { put16(w, ch[i]); put32(w + 4, fl[i]); }
+    powerStage(false);
+    int rc = uniCmd(UNI_SET_DOMAIN_INFO, dom, (uint32_t)(w - dom), false, nullptr, 0, nullptr);
+    setNum("MtkW4Domain", (uint32_t)rc);
+    powerStage(true);
+    char t[48];
+    snprintf(t, sizeof(t), "%c%c, %u channels (%u at 2.4 GHz), rc %d", country[0], country[1], n, n2, rc);
+    setProperty("MtkCountry", t);
+    return rc;
+}
+
 // One firmware scan of every channel in the domain (mt7925_mcu_hw_scan): wildcard SSID, active where allowed.
 // Results arrive as beacons / probe responses on the data ring (bssNote), the end as event SCAN_DONE.
 int MtkWlan::scanStart() {
     static uint8_t sc[4 + 20 + 368 + 16 + 136 + 12];
     bzero(sc, sizeof(sc));
-    uint32_t n2 = sizeof(kCh2), n5 = sizeof(kCh5);
+    uint8_t ch[48];
+    uint32_t n2, n = domainChannels(ch, nullptr, &n2);
     uint8_t *w = sc;
     scanSeq = (uint8_t)((scanSeq % 0x7f) + 1);
     bssGen++;
@@ -556,10 +588,8 @@ int MtkWlan::scanStart() {
     w += 16;
     put16(w, 12); put16(w + 2, 136);              // UNI_SCAN_CHANNEL
     w[4] = 4;                                     // specified channels
-    w[5] = (uint8_t)(n2 + n5);
-    uint32_t k = 0;
-    for (uint32_t i = 0; i < n2; i++, k++) { w[8 + 2 * k] = 1; w[9 + 2 * k] = kCh2[i]; }
-    for (uint32_t i = 0; i < n5; i++, k++) { w[8 + 2 * k] = 2; w[9 + 2 * k] = kCh5[i]; }
+    w[5] = (uint8_t)n;
+    for (uint32_t k = 0; k < n; k++) { w[8 + 2 * k] = k < n2 ? 1 : 2; w[9 + 2 * k] = ch[k]; }
     w += 136;
     put16(w, 14); put16(w + 2, 12);               // UNI_SCAN_MISC
     scanDone = false;
